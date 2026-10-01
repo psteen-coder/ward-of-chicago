@@ -1,5 +1,9 @@
 @import "tailwindcss";
 
+/* Landscape and wide enough for the side roster. Portrait phones stay stacked
+   even when the CSS width is over the usual lg breakpoint. */
+@custom-variant desk (@media (min-width: 900px) and (orientation: landscape));
+
 @theme {
   --color-bg: #0c1016;
   --color-surface: #161c27;
@@ -10,6 +14,7 @@
   --color-primary-fg: #1a1408;
   --color-ward: #7eb0c8;
   --color-danger: #c4514d;
+  --color-leaf: #7f9a62;
   --color-line: #2c3546;
   --font-sans: "Outfit", system-ui, sans-serif;
   --font-display: "Cinzel", "Palatino Linotype", Palatino, serif;
@@ -57,8 +62,31 @@
   animation: banner-pop 2.3s ease forwards;
 }
 
+.safe-top {
+  padding-top: env(safe-area-inset-top);
+}
+
+.safe-x {
+  padding-left: max(0.75rem, env(safe-area-inset-left));
+  padding-right: max(0.75rem, env(safe-area-inset-right));
+}
+
 .safe-pad {
   padding-bottom: max(0.75rem, env(safe-area-inset-bottom));
+}
+
+.safe-menu {
+  padding-top: max(2rem, env(safe-area-inset-top));
+  padding-right: max(1.25rem, env(safe-area-inset-right));
+  padding-bottom: max(2rem, env(safe-area-inset-bottom));
+  padding-left: max(1.25rem, env(safe-area-inset-left));
+}
+
+@media (min-width: 640px) {
+  .safe-menu {
+    padding-right: max(2.5rem, env(safe-area-inset-right));
+    padding-left: max(2.5rem, env(safe-area-inset-left));
+  }
 }
 
 .num {

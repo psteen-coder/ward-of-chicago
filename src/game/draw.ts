@@ -2,43 +2,59 @@ import {
   CELL,
   COLS,
   CREEPS,
-  PATH,
+  MAPS,
   ROWS,
+  TOP_PAD,
   TOWERS,
   WORLD_H,
   WORLD_W,
+  baseCell,
   cellCenter,
   combatStats,
+  pathMask,
   waypointXY,
   type CreepId,
+  type MapId,
   type TowerId,
 } from "./balance";
 import { placementStatus, type Game } from "./engine";
 
 export type ArtBook = {
-  map: HTMLImageElement | null;
+  maps: Partial<Record<MapId, HTMLImageElement>>;
   base: HTMLImageElement | null;
   towers: Partial<Record<TowerId, HTMLImageElement>>;
   creeps: Partial<Record<CreepId, HTMLImageElement>>;
 };
 
 export function emptyArt(): ArtBook {
-  return { map: null, base: null, towers: {}, creeps: {} };
+  return { maps: {}, base: null, towers: {}, creeps: {} };
 }
 
-type Drop = { x: number; y: number; v: number; len: number };
-let rain: Drop[] | null = null;
+type Drop = { x: number; y: number; v: number; len: number; drift: number };
+let weatherMap: MapId | null = null;
+let flakes: Drop[] | null = null;
 
-function drops() {
-  if (!rain) {
-    rain = Array.from({ length: 64 }, () => ({
+function weather(map: MapId) {
+  if (weatherMap !== map || !flakes) {
+    weatherMap = map;
+    const kind = MAPS[map].weather;
+    const count = kind === "embers" ? 26 : kind === "motes" ? 40 : kind === "snow" ? 70 : 64;
+    flakes = Array.from({ length: count }, () => ({
       x: Math.random() * WORLD_W,
       y: Math.random() * WORLD_H,
-      v: 260 + Math.random() * 240,
-      len: 8 + Math.random() * 12,
+      v:
+        kind === "snow"
+          ? 36 + Math.random() * 48
+          : kind === "embers"
+            ? -(28 + Math.random() * 36)
+            : kind === "motes"
+              ? 12 + Math.random() * 20
+              : 260 + Math.random() * 240,
+      len: kind === "rain" ? 8 + Math.random() * 12 : 1.5 + Math.random() * 1.5,
+      drift: kind === "snow" ? -10 + Math.random() * 20 : kind === "embers" ? -8 : kind === "motes" ? -6 : 18,
     }));
   }
-  return rain;
+  return flakes;
 }
 
 const LAMPS: [number, number][] = [
@@ -53,8 +69,7 @@ const LAMPS: [number, number][] = [
   [8, 7],
 ];
 
-function tracePath(ctx: CanvasRenderingContext2D) {
-  const pts = waypointXY();
+function tracePath(ctx: CanvasRenderingContext2D, pts: { x: number; y: number }[]) {
   ctx.beginPath();
   ctx.moveTo(pts[0].x, pts[0].y);
   for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
@@ -161,16 +176,20 @@ export function draw(
   ctx.scale(cssW / WORLD_W, cssH / WORLD_H);
   ctx.imageSmoothingEnabled = true;
 
+  const theme = MAPS[g.map] ?? MAPS.chicago;
+  const mask = pathMask(g.map);
+  const pts = waypointXY(g.map);
   ctx.fillStyle = "#10141c";
   ctx.fillRect(0, 0, WORLD_W, WORLD_H);
-  if (ready(art.map)) {
-    drawCover(ctx, art.map, 0, 0, WORLD_W, WORLD_H);
-    ctx.fillStyle = "rgba(8,10,16,0.34)";
+  const plate = art.maps[g.map];
+  if (ready(plate)) {
+    drawCover(ctx, plate, 0, 0, WORLD_W, WORLD_H);
+    ctx.fillStyle = theme.wash;
     ctx.fillRect(0, 0, WORLD_W, WORLD_H);
   }
 
   for (const [c, r] of LAMPS) {
-    if (PATH[r]?.[c]) continue;
+    if (mask[r]?.[c]) continue;
     const p = cellCenter(c, r);
     const glow = ctx.createRadialGradient(p.x, p.y, 4, p.x, p.y, CELL * 1.5);
     glow.addColorStop(0, "rgba(224,177,90,0.2)");
@@ -183,29 +202,28 @@ export function draw(
 
   ctx.lineJoin = "round";
   ctx.lineCap = "round";
-  tracePath(ctx);
-  ctx.strokeStyle = "#14110e";
+  tracePath(ctx, pts);
+  ctx.strokeStyle = theme.laneDark;
   ctx.lineWidth = CELL * 0.78;
   ctx.stroke();
-  tracePath(ctx);
-  ctx.strokeStyle = "#3a332a";
+  tracePath(ctx, pts);
+  ctx.strokeStyle = theme.lane;
   ctx.lineWidth = CELL * 0.58;
   ctx.stroke();
-  tracePath(ctx);
-  ctx.strokeStyle = "rgba(126,176,200,0.22)";
+  tracePath(ctx, pts);
+  ctx.strokeStyle = theme.ward;
   ctx.lineWidth = 3;
   ctx.stroke();
   ctx.setLineDash([12, 16]);
-  tracePath(ctx);
-  ctx.strokeStyle = "rgba(224,177,90,0.55)";
+  tracePath(ctx, pts);
+  ctx.strokeStyle = theme.dash;
   ctx.lineWidth = 2;
   ctx.stroke();
   ctx.setLineDash([]);
 
-  const pts = waypointXY();
   ctx.strokeStyle = "rgba(126,176,200,0.85)";
   ctx.lineWidth = 1.5;
-  for (let i = 2; i <= 7; i++) {
+  for (let i = 2; i < pts.length - 1; i++) {
     star(ctx, pts[i].x, pts[i].y, 7);
     ctx.stroke();
   }
@@ -213,7 +231,7 @@ export function draw(
   if (g.placing && g.phase !== "menu" && g.phase !== "victory" && g.phase !== "defeat") {
     for (let r = 0; r < ROWS; r++) {
       for (let c = 0; c < COLS; c++) {
-        if (PATH[r][c]) continue;
+        if (mask[r][c]) continue;
         if (g.towers.some((t) => t.c === c && t.r === r)) continue;
         const p = cellCenter(c, r);
         ctx.fillStyle = "rgba(224,177,90,0.45)";
@@ -230,7 +248,12 @@ export function draw(
         strokeRange(ctx, p.x, p.y, stats.range * CELL, status === "ok");
         ctx.strokeStyle = status === "ok" ? "#e0b15a" : "#c4514d";
         ctx.lineWidth = 2;
-        ctx.strokeRect(g.hoverC * CELL + 4, g.hoverR * CELL + 4, CELL - 8, CELL - 8);
+        ctx.strokeRect(
+          g.hoverC * CELL + 4,
+          TOP_PAD + g.hoverR * CELL + 4,
+          CELL - 8,
+          CELL - 8,
+        );
         if (status !== "street") {
           const def = TOWERS[g.placing];
           ctx.save();
@@ -257,7 +280,8 @@ export function draw(
     }
   }
 
-  const base = cellCenter(13, 6);
+  const door = baseCell(g.map);
+  const base = cellCenter(door.c, door.r);
   ctx.fillStyle = "rgba(126,176,200,0.16)";
   ctx.beginPath();
   ctx.arc(base.x, base.y, CELL * 0.55, 0, Math.PI * 2);
@@ -319,6 +343,13 @@ export function draw(
       ctx.ellipse(enemy.x, enemy.y + 8, 14, 5, 0, 0, Math.PI * 2);
       ctx.stroke();
     }
+    if ((enemy.stun ?? 0) > 0) {
+      ctx.strokeStyle = "rgba(214,230,240,0.9)";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(enemy.x, enemy.y - height * 0.15, 16, 0, Math.PI * 2);
+      ctx.stroke();
+    }
     ctx.fillStyle = "rgba(0,0,0,0.3)";
     ctx.beginPath();
     ctx.ellipse(enemy.x, enemy.y + 8, 12, 5, 0, 0, Math.PI * 2);
@@ -340,6 +371,10 @@ export function draw(
     ctx.fillRect(enemy.x - barW / 2, top, barW, 4);
     ctx.fillStyle = pct > 0.35 ? "#e0b15a" : "#c4514d";
     ctx.fillRect(enemy.x - barW / 2, top, barW * pct, 4);
+    if ((enemy.dotT ?? 0) > 0) {
+      ctx.fillStyle = enemy.dotHue || "#c4514d";
+      ctx.fillRect(enemy.x - barW / 2, top + 5, barW, 2);
+    }
   }
 
   for (const shot of g.projectiles) {
@@ -396,19 +431,37 @@ export function draw(
   }
 
   if (!reduce) {
+    const kind = theme.weather;
     ctx.lineWidth = 1.4;
-    ctx.strokeStyle = "rgba(214,226,232,0.28)";
-    for (const drop of drops()) {
+    for (const drop of weather(g.map)) {
       drop.y += drop.v * dt;
-      drop.x += dt * 18;
+      drop.x += drop.drift * dt;
       if (drop.y > WORLD_H + 8) {
         drop.y = -12;
         drop.x = Math.random() * WORLD_W;
+      } else if (drop.y < -16) {
+        drop.y = WORLD_H + 8;
+        drop.x = Math.random() * WORLD_W;
       }
-      ctx.beginPath();
-      ctx.moveTo(drop.x, drop.y);
-      ctx.lineTo(drop.x - 3, drop.y + drop.len);
-      ctx.stroke();
+      if (drop.x < -8) drop.x = WORLD_W + 4;
+      if (drop.x > WORLD_W + 8) drop.x = -4;
+      if (kind === "rain") {
+        ctx.strokeStyle = "rgba(214,226,232,0.28)";
+        ctx.beginPath();
+        ctx.moveTo(drop.x, drop.y);
+        ctx.lineTo(drop.x - 3, drop.y + drop.len);
+        ctx.stroke();
+      } else {
+        ctx.fillStyle =
+          kind === "embers"
+            ? "rgba(196,81,77,0.55)"
+            : kind === "motes"
+              ? "rgba(224,196,110,0.7)"
+              : "rgba(236,244,250,0.75)";
+        ctx.beginPath();
+        ctx.arc(drop.x, drop.y, drop.len, 0, Math.PI * 2);
+        ctx.fill();
+      }
     }
   }
 

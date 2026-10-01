@@ -1,6 +1,6 @@
 # Ward of Chicago
 
-Fan tower-defense game. Hold a Chicago boarding house for ten nights.
+Fan tower-defense game. Choose a court — Dresden, Red Court, Winter Court, or Summer Court — and a ground. Each ground has its own road. Hold the last door for ten nights. On a phone the board sits above a scrolling roster; a wide landscape window keeps the side panel. Add it to your home screen from Settings to open it full screen.
 
 Not affiliated with Jim Butcher or the rights holders. Original art. No official logos.
 
