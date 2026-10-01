@@ -11,6 +11,8 @@ export const SELL_REFUND = 0.6;
 export const BEST_KEY = "ward-of-chicago-best";
 export const BESTS_KEY = "ward-of-chicago-bests";
 export const SAVE_KEY = "ward-of-chicago-save";
+/** Endless high nights and speed-run times. Standard bests stay on BESTS_KEY. */
+export const MARKS_KEY = "ward-of-chicago-marks";
 
 export type MapId = "chicago" | "mansion" | "forest" | "tundra";
 
@@ -152,6 +154,57 @@ export const TEAMS: Record<TeamId, TeamDef> = {
 
 export function isTeamId(value: unknown): value is TeamId {
   return typeof value === "string" && TEAM_ORDER.includes(value as TeamId);
+}
+
+export type ModeId = "standard" | "endless" | "speed";
+
+export const MODE_ORDER: ModeId[] = ["standard", "endless", "speed"];
+
+export type ModeDef = {
+  id: ModeId;
+  name: string;
+  blurb: string;
+};
+
+export const MODES: Record<ModeId, ModeDef> = {
+  standard: {
+    id: "standard",
+    name: "Standard Night",
+    blurb: "Ten nights, then dawn. You choose when the next one starts.",
+  },
+  endless: {
+    id: "endless",
+    name: "Endless Night",
+    blurb: "The street does not end. High score is the last night you finish.",
+  },
+  speed: {
+    id: "speed",
+    name: "Speed Run",
+    blurb: "Send the first night. Every night after starts the moment the street is clear.",
+  },
+};
+
+export function isModeId(value: unknown): value is ModeId {
+  return typeof value === "string" && MODE_ORDER.includes(value as ModeId);
+}
+
+export type Marks = {
+  /** Highest night finished, per ground. */
+  endless: Record<MapId, number>;
+  /** Best full-clear time in simulated seconds. 0 means unwalked. Lower wins. */
+  speed: Record<MapId, number>;
+};
+
+export function emptyMarks(): Marks {
+  return { endless: emptyBests(), speed: emptyBests() };
+}
+
+/** m:ss. Simulated fight time, not the wall clock. */
+export function formatClock(seconds: number): string {
+  const whole = Math.max(0, Math.floor(Number.isFinite(seconds) ? seconds : 0));
+  const m = Math.floor(whole / 60);
+  const s = whole % 60;
+  return `${m}:${String(s).padStart(2, "0")}`;
 }
 
 export const TOWER_ORDER: TowerId[] = TEAMS.dresden.units;
@@ -774,6 +827,46 @@ export const WAVES: WaveGroup[][] = [
   ],
 ];
 
+/** Scripted nights in Standard Night and Speed Run. Endless continues past this. */
+export const NIGHT_COUNT = WAVES.length;
+
+export function endlessWave(index: number): WaveGroup[] {
+  const extra = Math.max(0, index - NIGHT_COUNT);
+  const tier = Math.floor(extra / 3) + 1;
+  const slot = extra % 3;
+  const cap = (n: number) => Math.min(28, Math.max(1, Math.round(n)));
+  const gap = (base: number, floor: number) =>
+    Math.round(Math.max(floor, base - tier * 0.03) * 100) / 100;
+  if (slot === 0) {
+    return [
+      { kind: "fledgling", count: cap(10 + tier * 2), interval: gap(0.62, 0.32) },
+      { kind: "ghoul", count: cap(4 + tier), interval: gap(0.9, 0.55) },
+    ];
+  }
+  if (slot === 1) {
+    return [
+      { kind: "ghoul", count: cap(6 + tier * 2), interval: gap(0.75, 0.45) },
+      { kind: "blackcourt", count: cap(3 + tier), interval: gap(1, 0.55) },
+    ];
+  }
+  return [
+    { kind: "fledgling", count: cap(Math.max(4, 8 + tier)), interval: gap(0.4, 0.26) },
+    { kind: "outsider", count: Math.min(4, 1 + Math.floor(tier / 2)), interval: gap(1.2, 0.9) },
+    { kind: "blackcourt", count: cap(3 + Math.floor(tier / 2)), interval: gap(0.85, 0.5) },
+  ];
+}
+
+/** Nights 1–10 are the scripted waves. Later nights exist only for Endless Night. */
+export function waveAt(index: number): WaveGroup[] {
+  return WAVES[index] ?? endlessWave(index);
+}
+
+export function waveCreepCount(wave: WaveGroup[]): number {
+  let n = 0;
+  for (const group of wave) n += Math.max(0, group.count);
+  return n;
+}
+
 export const BASE = { c: 13, r: 6 };
 
 type Cell = { c: number; r: number };
@@ -884,8 +977,8 @@ export function baseCell(map: MapId) {
 }
 
 export function describeWave(index: number): string {
-  const wave = WAVES[index];
-  if (!wave) return "Dawn";
+  const wave = waveAt(index);
+  if (waveCreepCount(wave) <= 0) return "Dawn";
   return wave
     .map((group) => {
       const def = CREEPS[group.kind];

@@ -6,6 +6,9 @@ import {
   CREEPS,
   MAPS,
   MAP_ORDER,
+  MARKS_KEY,
+  MODES,
+  NIGHT_COUNT,
   RANK_NAMES,
   ROWS,
   SAVE_KEY,
@@ -14,18 +17,24 @@ import {
   START_LIVES,
   TOWERS,
   TEAMS,
-  WAVES,
   cellCenter,
   combatStats,
   describeWave,
   emptyBests,
+  emptyMarks,
+  formatClock,
+  isModeId,
   isTeamId,
   pathMask,
   upgradeCost,
+  waveAt,
+  waveCreepCount,
   waypointXY,
   type CombatStats,
   type CreepId,
   type MapId,
+  type Marks,
+  type ModeId,
   type TargetMode,
   type TeamId,
   type TowerId,
@@ -129,8 +138,22 @@ export type Game = {
   bannerT: number;
   best: number;
   bests: Record<MapId, number>;
+  marks: Marks;
   map: MapId;
   team: TeamId;
+  mode: ModeId;
+  /** Local battle. Skips story saves, bests, and the scripted night clear. */
+  duel: boolean;
+  /** Coin paid by kills this run, including siphon. Not starting coin, not sell refunds. */
+  goldEarned: number;
+  /** Lives the door has already paid. */
+  livesLost: number;
+  /** Simulated seconds for each night that fully cleared. */
+  roundTimes: number[];
+  /** Simulated combat seconds. Pause, prep, and 2× playback do not change it. */
+  combatTime: number;
+  /** combatTime at the start of the night now in the street. */
+  roundMark: number;
   time: number;
   shake: number;
   flash: number;
@@ -184,16 +207,28 @@ export type Hud = {
   bannerSeq: number;
   best: number;
   bests: Record<MapId, number>;
+  marks: Marks;
   map: MapId;
   mapName: string;
   mapPlace: string;
   team: TeamId;
   teamName: string;
+  mode: ModeId;
+  modeName: string;
+  goldEarned: number;
+  livesLost: number;
+  roundTimes: number[];
+  combatTime: number;
+  /** Simulated seconds already spent on the night in the street. */
+  nightClock: number;
+  /** True when the current night has not been pushed onto roundTimes. */
+  nightOpen: boolean;
   hasSave: boolean;
   saveName: string;
   savePlace: string;
   saveNight: number;
   saveTeam: string;
+  saveMode: string;
   selected: Selection | null;
 };
 
@@ -210,6 +245,8 @@ type SaveBrief = {
   sent: number;
   team: TeamId;
   teamName: string;
+  mode: ModeId;
+  modeName: string;
 };
 let saveBrief: SaveBrief | null = null;
 let lastPersist = -999;
@@ -232,6 +269,12 @@ type SaveFile = {
   towers: Tower[];
   enemies: Enemy[];
   spawnQueue: SpawnJob[];
+  mode?: ModeId;
+  goldEarned?: number;
+  livesLost?: number;
+  roundTimes?: number[];
+  combatTime?: number;
+  roundMark?: number;
 };
 
 export function createGame(): Game {
@@ -253,8 +296,16 @@ export function createGame(): Game {
     bannerT: 0,
     best: 0,
     bests: emptyBests(),
+    marks: emptyMarks(),
     map: "chicago",
     team: "dresden",
+    mode: "standard",
+    duel: false,
+    goldEarned: 0,
+    livesLost: 0,
+    roundTimes: [],
+    combatTime: 0,
+    roundMark: 0,
     time: 0,
     shake: 0,
     flash: 0,
@@ -303,6 +354,12 @@ export function buildHud(g: Game): Hud {
   for (const job of g.spawnQueue) queued += job.left;
   const alive = g.enemies.reduce((n, e) => n + (e.alive ? 1 : 0), 0);
   const nextIndex = g.phase === "prep" || g.phase === "menu" ? g.sent : -1;
+  const mode = isModeId(g.mode) ? g.mode : "standard";
+  const marks = g.marks ?? emptyMarks();
+  const roundTimes = Array.isArray(g.roundTimes) ? g.roundTimes : [];
+  const combatTime = Number.isFinite(g.combatTime) ? g.combatTime : 0;
+  const roundMark = Number.isFinite(g.roundMark) ? g.roundMark : 0;
+  const nightOpen = g.phase === "combat" || (g.phase === "defeat" && roundTimes.length < g.sent);
   return {
     phase: g.phase,
     gold: g.gold,
@@ -311,7 +368,7 @@ export function buildHud(g: Game): Hud {
     slain: g.slain,
     cleared: g.cleared,
     sent: g.sent,
-    total: WAVES.length,
+    total: mode === "endless" ? 0 : NIGHT_COUNT,
     remaining: alive + queued,
     nextBlurb: nextIndex >= 0 ? describeWave(nextIndex) : "",
     placing: g.placing,
@@ -321,16 +378,26 @@ export function buildHud(g: Game): Hud {
     bannerSeq: g.bannerSeq,
     best: g.best,
     bests: g.bests,
+    marks,
     map: g.map,
     mapName: MAPS[g.map].name,
     mapPlace: MAPS[g.map].place,
     team: isTeamId(g.team) ? g.team : "dresden",
     teamName: TEAMS[isTeamId(g.team) ? g.team : "dresden"].name,
+    mode,
+    modeName: MODES[mode].name,
+    goldEarned: Number.isFinite(g.goldEarned) ? g.goldEarned : 0,
+    livesLost: Number.isFinite(g.livesLost) ? g.livesLost : 0,
+    roundTimes,
+    combatTime,
+    nightClock: nightOpen ? Math.max(0, combatTime - roundMark) : (roundTimes[roundTimes.length - 1] ?? 0),
+    nightOpen,
     hasSave: saveBrief != null,
     saveName: saveBrief?.name ?? "",
     savePlace: saveBrief?.place ?? "",
     saveNight: saveBrief?.sent ?? 0,
     saveTeam: saveBrief?.teamName ?? "",
+    saveMode: saveBrief?.modeName ?? "",
     selected: selectionOf(g),
   };
 }
@@ -352,11 +419,44 @@ export function subscribe(fn: () => void) {
 }
 
 function emit(g: Game) {
+  if (quiet > 0) {
+    g.dirty = false;
+    return;
+  }
   g.dirty = false;
-  if (quiet === 0) persistRun(g, true);
+  persistRun(g, true);
   hud = buildHud(g);
-  if (quiet > 0) return;
   for (const fn of [...listeners]) fn();
+}
+
+export function runQuiet(fn: () => void) {
+  quiet += 1;
+  try {
+    fn();
+  } finally {
+    quiet -= 1;
+  }
+}
+
+export function refresh(g: Game) {
+  emit(g);
+}
+
+let leaveDuel: (() => void) | null = null;
+
+export function bindLeaveDuel(fn: () => void) {
+  leaveDuel = fn;
+}
+
+function leaveBattle() {
+  leaveDuel?.();
+}
+
+export function queueCreeps(g: Game, kind: CreepId, count: number, interval: number) {
+  if (g.phase !== "combat") return;
+  if (!(kind in CREEPS) || count <= 0) return;
+  g.spawnQueue.push({ kind, left: count, interval: Math.max(0.2, interval) });
+  g.dirty = true;
 }
 
 export function ensureGame() {
@@ -381,8 +481,52 @@ function persistBests(bests: Record<MapId, number>) {
   }
 }
 
+function persistMarks(marks: Marks) {
+  try {
+    if (typeof localStorage === "undefined") return;
+    localStorage.setItem(MARKS_KEY, JSON.stringify(marks));
+  } catch {
+    /* private mode */
+  }
+}
+
+function modeOf(g: Game): ModeId {
+  return isModeId(g.mode) ? g.mode : "standard";
+}
+
+function scoreBest(mode: ModeId, bests: Record<MapId, number>, marks: Marks, map: MapId) {
+  if (mode === "endless") return marks.endless[map] ?? 0;
+  if (mode === "speed") return marks.speed[map] ?? 0;
+  return bests[map] ?? 0;
+}
+
 function remember(g: Game) {
-  const reached = g.phase === "victory" ? WAVES.length : g.cleared;
+  const mode = modeOf(g);
+  const marks = g.marks ?? emptyMarks();
+  g.marks = marks;
+  if (mode === "endless") {
+    const reached = g.cleared;
+    const prev = marks.endless[g.map] ?? 0;
+    if (reached > prev) {
+      g.marks = { ...marks, endless: { ...marks.endless, [g.map]: reached } };
+      persistMarks(g.marks);
+    }
+    g.best = Math.max(reached, g.marks.endless[g.map] ?? 0);
+    return;
+  }
+  if (mode === "speed") {
+    if (g.phase === "victory") {
+      const time = g.combatTime;
+      const prev = marks.speed[g.map] ?? 0;
+      if (time > 0 && (prev <= 0 || time < prev)) {
+        g.marks = { ...marks, speed: { ...marks.speed, [g.map]: time } };
+        persistMarks(g.marks);
+      }
+    }
+    g.best = g.marks.speed[g.map] ?? 0;
+    return;
+  }
+  const reached = g.phase === "victory" ? NIGHT_COUNT : g.cleared;
   const prev = g.bests[g.map] ?? 0;
   if (reached > prev) {
     g.bests = { ...g.bests, [g.map]: reached };
@@ -395,6 +539,11 @@ function endGame(g: Game, phase: "victory" | "defeat") {
   g.phase = phase;
   g.paused = false;
   g.placing = null;
+  if (g.duel) {
+    g.events.push(phase);
+    g.dirty = true;
+    return;
+  }
   remember(g);
   clearSave();
   g.events.push(phase);
@@ -421,6 +570,7 @@ function readSave(): SaveFile | null {
     if (data.phase !== "prep" && data.phase !== "combat") return null;
     if (!Array.isArray(data.towers) || !Array.isArray(data.enemies)) return null;
     const team = isTeamId(data.team) ? data.team : "dresden";
+    const mode = isModeId(data.mode) ? data.mode : "standard";
     saveBrief = {
       map: data.map,
       name: MAPS[data.map].name,
@@ -428,6 +578,8 @@ function readSave(): SaveFile | null {
       sent: Number(data.sent) || 0,
       team,
       teamName: TEAMS[team].name,
+      mode,
+      modeName: MODES[mode].name,
     };
     return data;
   } catch {
@@ -441,6 +593,7 @@ function writeSave(g: Game) {
     v: 1,
     map: g.map,
     team: g.team,
+    mode: modeOf(g),
     phase: g.phase === "combat" ? "combat" : "prep",
     gold: g.gold,
     lives: g.lives,
@@ -452,6 +605,11 @@ function writeSave(g: Game) {
     time: g.time,
     nextId: g.nextId,
     spawnAcc: g.spawnAcc,
+    goldEarned: g.goldEarned || 0,
+    livesLost: g.livesLost || 0,
+    roundTimes: Array.isArray(g.roundTimes) ? g.roundTimes.slice() : [],
+    combatTime: g.combatTime || 0,
+    roundMark: g.roundMark || 0,
     towers: g.towers.map((t) => ({ ...t, recoil: 0 })),
     enemies: g.enemies.filter((e) => e.alive).map((e) => ({ ...e })),
     spawnQueue: g.spawnQueue.map((job) => ({ ...job })),
@@ -462,6 +620,7 @@ function writeSave(g: Game) {
   } catch {
     /* ignore quota */
   }
+  const mode = modeOf(g);
   saveBrief = {
     map: g.map,
     name: MAPS[g.map].name,
@@ -469,6 +628,8 @@ function writeSave(g: Game) {
     sent: g.sent,
     team: g.team,
     teamName: TEAMS[g.team].name,
+    mode,
+    modeName: MODES[mode].name,
   };
   lastPersist = g.time;
 }
@@ -485,21 +646,25 @@ function clearSave() {
 }
 
 function persistRun(g: Game, force: boolean) {
-  if (quiet > 0) return;
+  if (quiet > 0 || g.duel) return;
   if (g.phase !== "prep" && g.phase !== "combat") return;
   if (!force && g.time - lastPersist < 1) return;
   writeSave(g);
 }
 
 function applySave(g: Game, data: SaveFile) {
-  const bests = g.bests;
+  const bests = g.bests ?? emptyBests();
+  const marks = g.marks ?? emptyMarks();
   const fresh = createGame();
   fresh.bests = bests;
+  fresh.marks = marks;
   const team = isTeamId(data.team) ? data.team : "dresden";
+  const mode = isModeId(data.mode) ? data.mode : "standard";
   const mask = pathMask(data.map);
   fresh.map = data.map;
   fresh.team = team;
-  fresh.best = bests[data.map] ?? 0;
+  fresh.mode = mode;
+  fresh.best = scoreBest(mode, bests, marks, data.map);
   fresh.phase = data.phase;
   fresh.gold = Math.max(0, Math.floor(data.gold) || 0);
   fresh.lives = Math.max(0, Math.floor(data.lives) || 0);
@@ -509,6 +674,13 @@ function applySave(g: Game, data: SaveFile) {
   fresh.paused = Boolean(data.paused);
   fresh.speed = data.speed === 2 ? 2 : 1;
   fresh.time = Number(data.time) || 0;
+  fresh.goldEarned = Math.max(0, Math.floor(Number(data.goldEarned)) || 0);
+  fresh.livesLost = Math.max(0, Math.floor(Number(data.livesLost)) || 0);
+  fresh.combatTime = Math.max(0, Number(data.combatTime) || 0);
+  fresh.roundMark = Math.max(0, Number(data.roundMark) || 0);
+  fresh.roundTimes = Array.isArray(data.roundTimes)
+    ? data.roundTimes.filter((n) => Number.isFinite(n) && n >= 0)
+    : [];
   fresh.nextId = Math.max(1, Math.floor(data.nextId) || 1);
   fresh.spawnAcc = Number(data.spawnAcc) || 0;
   fresh.towers = data.towers.filter(
@@ -536,6 +708,28 @@ function applySave(g: Game, data: SaveFile) {
   Object.assign(g, fresh);
 }
 
+function readMarks(): Marks {
+  const marks = emptyMarks();
+  try {
+    if (typeof localStorage === "undefined") return marks;
+    const raw = localStorage.getItem(MARKS_KEY);
+    if (!raw) return marks;
+    const parsed = JSON.parse(raw) as {
+      endless?: Partial<Record<MapId, number>>;
+      speed?: Partial<Record<MapId, number>>;
+    };
+    for (const id of MAP_ORDER) {
+      const nights = Number(parsed?.endless?.[id]);
+      const time = Number(parsed?.speed?.[id]);
+      if (Number.isFinite(nights) && nights > 0) marks.endless[id] = nights;
+      if (Number.isFinite(time) && time > 0) marks.speed[id] = time;
+    }
+  } catch {
+    /* ignore */
+  }
+  return marks;
+}
+
 export function loadBest(g: Game) {
   try {
     if (typeof localStorage === "undefined") return;
@@ -552,7 +746,8 @@ export function loadBest(g: Game) {
       if (Number.isFinite(n) && n > 0) bests.chicago = n;
     }
     g.bests = bests;
-    g.best = bests[g.map] ?? 0;
+    g.marks = readMarks();
+    g.best = scoreBest(modeOf(g), bests, g.marks, g.map);
     readSave();
     emit(g);
   } catch {
@@ -560,18 +755,28 @@ export function loadBest(g: Game) {
   }
 }
 
-export function newGame(g: Game, mapId: MapId = "chicago", teamId: TeamId = "dresden") {
+export function newGame(
+  g: Game,
+  mapId: MapId = "chicago",
+  teamId: TeamId = "dresden",
+  modeId: ModeId = "standard",
+) {
   const id = isMapId(mapId) ? mapId : "chicago";
   const team = isTeamId(teamId) ? teamId : "dresden";
+  const mode = isModeId(modeId) ? modeId : "standard";
+  leaveBattle();
   const bests = g.bests ?? emptyBests();
+  const marks = g.marks ?? emptyMarks();
   const fresh = createGame();
   fresh.bests = bests;
+  fresh.marks = marks;
   fresh.map = id;
   fresh.team = team;
-  fresh.best = bests[id] ?? 0;
+  fresh.mode = mode;
+  fresh.best = scoreBest(mode, bests, marks, id);
   fresh.phase = "prep";
   Object.assign(g, fresh);
-  say(g, `${TEAMS[team].name} · ${MAPS[id].place}`);
+  say(g, `${MODES[mode].name} · ${TEAMS[team].name} · ${MAPS[id].place}`);
   emit(g);
 }
 
@@ -582,6 +787,7 @@ export function startCase(g: Game, mapId?: MapId, teamId?: TeamId) {
 export function continueGame(g: Game) {
   const data = readSave();
   if (!data) return false;
+  leaveBattle();
   applySave(g, data);
   say(g, MAPS[g.map].place);
   emit(g);
@@ -589,7 +795,7 @@ export function continueGame(g: Game) {
 }
 
 export function toMenu(g: Game) {
-  if (g.phase === "prep" || g.phase === "combat") writeSave(g);
+  if (!g.duel && (g.phase === "prep" || g.phase === "combat")) writeSave(g);
   g.phase = "menu";
   g.paused = false;
   g.placing = null;
@@ -600,7 +806,7 @@ export function toMenu(g: Game) {
 }
 
 export function restart(g: Game) {
-  newGame(g, g.map, g.team);
+  newGame(g, g.map, g.team, modeOf(g));
 }
 
 export function selectKind(g: Game, kind: TowerId) {
@@ -672,6 +878,11 @@ function placeTower(g: Game, kind: TowerId, c: number, r: number) {
 
 export function clickCell(g: Game, c: number, r: number) {
   if (g.phase === "menu" || g.phase === "victory" || g.phase === "defeat") return;
+  if (g.duel && g.paused && g.placing) {
+    say(g, "The street is held.");
+    emit(g);
+    return;
+  }
   if (g.placing) {
     const existing = g.towers.find((t) => t.c === c && t.r === r);
     if (existing) {
@@ -705,6 +916,11 @@ export function clickCell(g: Game, c: number, r: number) {
 }
 
 export function upgradeSelected(g: Game) {
+  if (g.duel && g.paused) {
+    say(g, "The street is held.");
+    emit(g);
+    return;
+  }
   const tower = g.towers.find((t) => t.id === g.selected);
   if (!tower) return;
   const cost = upgradeCost(tower.kind, tower.rank);
@@ -728,6 +944,11 @@ export function upgradeSelected(g: Game) {
 }
 
 export function sellSelected(g: Game) {
+  if (g.duel && g.paused) {
+    say(g, "The street is held.");
+    emit(g);
+    return;
+  }
   const tower = g.towers.find((t) => t.id === g.selected);
   if (!tower) return;
   const refund = Math.floor(tower.spent * SELL_REFUND);
@@ -739,16 +960,11 @@ export function sellSelected(g: Game) {
   emit(g);
 }
 
-export function sendWave(g: Game) {
-  if (g.phase !== "prep") return;
-  if (g.sent >= WAVES.length) return;
-  if (g.towers.length === 0) {
-    say(g, "Post a defender before you open the street.");
-    g.events.push("deny");
-    emit(g);
-    return;
-  }
-  const wave = WAVES[g.sent];
+function beginWave(g: Game) {
+  const mode = modeOf(g);
+  if (mode !== "endless" && g.sent >= NIGHT_COUNT) return false;
+  const wave = waveAt(g.sent);
+  if (waveCreepCount(wave) <= 0) return false;
   g.spawnQueue = wave.map((group) => ({
     kind: group.kind,
     left: group.count,
@@ -757,6 +973,21 @@ export function sendWave(g: Game) {
   g.spawnAcc = wave[0]?.interval ?? 0;
   g.sent += 1;
   g.phase = "combat";
+  g.paused = false;
+  g.roundMark = g.combatTime || 0;
+  return true;
+}
+
+export function sendWave(g: Game) {
+  if (g.phase !== "prep") return;
+  if (modeOf(g) !== "endless" && g.sent >= NIGHT_COUNT) return;
+  if (g.towers.length === 0) {
+    say(g, "Post a defender before you open the street.");
+    g.events.push("deny");
+    emit(g);
+    return;
+  }
+  if (!beginWave(g)) return;
   say(g, `Night ${g.sent} hits the street.`);
   g.events.push("wave");
   emit(g);
@@ -806,6 +1037,7 @@ function finishKill(g: Game, enemy: Enemy, siphon: number) {
   enemy.hp = 0;
   const bounty = CREEPS[enemy.kind].gold + Math.max(0, Math.round(siphon));
   g.gold += bounty;
+  g.goldEarned = (g.goldEarned || 0) + bounty;
   g.slain += 1;
   g.events.push("kill");
   floatText(g, enemy.x, enemy.y - 20, `+${bounty}`, "#e0b15a");
@@ -850,6 +1082,7 @@ function leak(g: Game, enemy: Enemy) {
   if (g.phase !== "combat") return;
   const cost = CREEPS[enemy.kind].leak;
   g.lives -= cost;
+  g.livesLost = (g.livesLost || 0) + cost;
   g.events.push("leak");
   g.shake = 1;
   g.flash = 0.5;
@@ -1038,6 +1271,7 @@ function spawnEnemy(g: Game, kind: CreepId) {
 
 function simulate(g: Game, dt: number) {
   if (g.phase !== "combat") return;
+  g.combatTime = (g.combatTime || 0) + dt;
   const pts = waypointXY(g.map);
   g.spawnAcc += dt;
   const head = g.spawnQueue[0];
@@ -1155,13 +1389,27 @@ function simulate(g: Game, dt: number) {
   if (g.projectiles.length > 24) g.projectiles = g.projectiles.filter((p) => p.alive);
   g.enemies = g.enemies.filter((e) => e.alive);
 
-  if (g.phase === "combat" && g.spawnQueue.length === 0 && g.enemies.length === 0) {
+  if (g.phase === "combat" && !g.duel && g.spawnQueue.length === 0 && g.enemies.length === 0) {
+    if (!Array.isArray(g.roundTimes)) g.roundTimes = [];
+    const elapsed = Math.max(0, (g.combatTime || 0) - (g.roundMark || 0));
+    g.roundTimes.push(elapsed);
     g.cleared = g.sent;
-    if (g.sent >= WAVES.length) endGame(g, "victory");
-    else {
+    const mode = modeOf(g);
+    const finished = mode !== "endless" && g.sent >= NIGHT_COUNT;
+    if (finished) {
+      endGame(g, "victory");
+    } else if (mode === "speed") {
+      if (!beginWave(g)) {
+        endGame(g, "victory");
+      } else {
+        say(g, `Night ${g.sent} hits the street. ${formatClock(elapsed)} on the last.`);
+        g.events.push("waveclear");
+        g.events.push("wave");
+      }
+    } else {
       g.phase = "prep";
       g.paused = false;
-      say(g, `Night ${g.sent} is quiet.`);
+      say(g, `Night ${g.sent} is quiet. ${formatClock(elapsed)}.`);
       g.events.push("waveclear");
     }
   }
@@ -1198,12 +1446,14 @@ export function step(g: Game, dt: number) {
   }
   updateFx(g, frame);
   if (g.phase === "combat" && !g.paused) {
+    const clockBefore = Math.floor(g.combatTime || 0);
     let left = frame * g.speed;
     while (left > 0.0001 && g.phase === "combat") {
       const slice = Math.min(left, 1 / 60);
       simulate(g, slice);
       left -= slice;
     }
+    if (Math.floor(g.combatTime || 0) !== clockBefore) g.dirty = true;
   }
   persistRun(g, false);
   if (g.dirty) emit(g);

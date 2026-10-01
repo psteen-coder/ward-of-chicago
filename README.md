@@ -1,6 +1,6 @@
 # Ward of Chicago
 
-Fan tower-defense game. Choose a court — Dresden, Red Court, Winter Court, or Summer Court — and a ground. Each ground has its own road. Hold the last door for ten nights. On a phone the board sits above a scrolling roster; a wide landscape window keeps the side panel. Add it to your home screen from Settings to open it full screen.
+Fan tower-defense game. The front door asks for single player or a local battle before the night, the court, and the ground. Single player is Standard Night, Endless Night, or Speed Run. Multiplayer stays on this device: your court holds one street, a rival court holds the other, coin ticks in, and you spend it to build or to push creeps onto their road. The first door to break loses. On a phone the board sits above a scrolling roster; a wide landscape window keeps the side panel. Add it to your home screen from Settings to open it full screen.
 
 Not affiliated with Jim Butcher or the rights holders. Original art. No official logos.
 
@@ -11,7 +11,7 @@ npm install
 npm run dev
 ```
 
-You start with 175 coin and 20 lives. Post towers on the gold dots beside the street. Anything that reaches the stoop costs lives. Clear all ten nights, or walk it again from the end screen. Best night held stays in this browser.
+You start with 175 coin and 20 lives. Post towers on the gold dots beside the street. Anything that reaches the stoop costs lives. A finished run records gold generated, lives lost, the simulated time of each night, and the highest night you finished. Two-times speed and the pause button do not change that clock. Best nights, endless high scores, and speed-run times stay in this browser.
 
 | Tower | Role | Cost |
 | --- | --- | --- |
