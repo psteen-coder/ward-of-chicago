@@ -23,4 +23,10 @@ You start with 175 coin and 20 lives. Post towers on the gold dots beside the st
 
 Tap a name, then a sidewalk. Upgrade twice (Honed, then Warden) to raise damage and fire rate. Aim First, Nearest, or Strongest. Sell refunds part of what you spent.
 
+## Android
+
+The website is the game. The Android package is the same game, installed from a file.
+
+GitHub Actions builds `Ward-of-Chicago.apk` and attaches it to a release. Download that file on the phone, open it, and allow the install when Android asks. There is no store listing.
+
 Keys: `1`–`5` pick a tower, `U` hones, `Space` sends the night or pauses.

@@ -1,0 +1,8 @@
+{
+  "appId": "com.psteencoder.wardofchicago",
+  "appName": "Ward of Chicago",
+  "webDir": "android-www",
+  "android": {
+    "backgroundColor": "#0c1016"
+  }
+}
