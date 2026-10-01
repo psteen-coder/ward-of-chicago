@@ -8,6 +8,7 @@ on:
 
 permissions:
   contents: write
+  actions: write
 
 jobs:
   apk:
@@ -93,6 +94,13 @@ jobs:
         run: |
           cp android/app/build/outputs/apk/release/app-release.apk Ward-of-Chicago.apk
           ls -lh Ward-of-Chicago.apk
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Ward-of-Chicago
+          path: Ward-of-Chicago.apk
+          if-no-files-found: error
 
       - name: Publish release
         uses: softprops/action-gh-release@v2
