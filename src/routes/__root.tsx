@@ -14,7 +14,7 @@ export const Route = createRootRoute({
       {
         name: "description",
         content:
-          "Hold the boarding house through ten nights. A fan-made Dresden Files tower defense.",
+          "Single player nights, or a local battle against a rival court. A fan-made tower defense.",
       },
       { name: "theme-color", content: "#0c1016" },
       { name: "mobile-web-app-capable", content: "yes" },
