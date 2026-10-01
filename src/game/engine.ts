@@ -1,25 +1,35 @@
 import {
   BEST_KEY,
+  BESTS_KEY,
   CELL,
   COLS,
   CREEPS,
+  MAPS,
+  MAP_ORDER,
   RANK_NAMES,
   ROWS,
+  SAVE_KEY,
   SELL_REFUND,
   START_GOLD,
   START_LIVES,
   TOWERS,
+  TEAMS,
   WAVES,
+  cellCenter,
   combatStats,
   describeWave,
+  emptyBests,
+  isTeamId,
+  pathMask,
   upgradeCost,
   waypointXY,
   type CombatStats,
   type CreepId,
+  type MapId,
   type TargetMode,
+  type TeamId,
   type TowerId,
 } from "./balance";
-import { PATH } from "./balance";
 
 export type Phase = "menu" | "prep" | "combat" | "victory" | "defeat";
 
@@ -46,6 +56,11 @@ export type Enemy = {
   hp: number;
   maxHp: number;
   slow: number;
+  stun: number;
+  dot: number;
+  dotT: number;
+  siphon: number;
+  dotHue: string;
   face: number;
   flash: number;
   alive: boolean;
@@ -64,6 +79,11 @@ export type Projectile = {
   pierce: boolean;
   slow: number;
   splash: number;
+  stun: number;
+  dot: number;
+  dotTime: number;
+  siphon: number;
+  shatter: number;
   color: string;
   targetId: number | null;
 };
@@ -108,6 +128,9 @@ export type Game = {
   bannerSeq: number;
   bannerT: number;
   best: number;
+  bests: Record<MapId, number>;
+  map: MapId;
+  team: TeamId;
   time: number;
   shake: number;
   flash: number;
@@ -160,6 +183,17 @@ export type Hud = {
   banner: string;
   bannerSeq: number;
   best: number;
+  bests: Record<MapId, number>;
+  map: MapId;
+  mapName: string;
+  mapPlace: string;
+  team: TeamId;
+  teamName: string;
+  hasSave: boolean;
+  saveName: string;
+  savePlace: string;
+  saveNight: number;
+  saveTeam: string;
   selected: Selection | null;
 };
 
@@ -168,6 +202,37 @@ export type PlaceResult = "ok" | "street" | "held" | "bounds" | "gold" | "closed
 const listeners = new Set<() => void>();
 let quiet = 0;
 let game: Game | null = null;
+
+type SaveBrief = {
+  map: MapId;
+  name: string;
+  place: string;
+  sent: number;
+  team: TeamId;
+  teamName: string;
+};
+let saveBrief: SaveBrief | null = null;
+let lastPersist = -999;
+
+type SaveFile = {
+  v: 1;
+  map: MapId;
+  team?: TeamId;
+  phase: "prep" | "combat";
+  gold: number;
+  lives: number;
+  slain: number;
+  cleared: number;
+  sent: number;
+  paused: boolean;
+  speed: 1 | 2;
+  time: number;
+  nextId: number;
+  spawnAcc: number;
+  towers: Tower[];
+  enemies: Enemy[];
+  spawnQueue: SpawnJob[];
+};
 
 export function createGame(): Game {
   return {
@@ -187,6 +252,9 @@ export function createGame(): Game {
     bannerSeq: 0,
     bannerT: 0,
     best: 0,
+    bests: emptyBests(),
+    map: "chicago",
+    team: "dresden",
     time: 0,
     shake: 0,
     flash: 0,
@@ -252,6 +320,17 @@ export function buildHud(g: Game): Hud {
     banner: g.banner,
     bannerSeq: g.bannerSeq,
     best: g.best,
+    bests: g.bests,
+    map: g.map,
+    mapName: MAPS[g.map].name,
+    mapPlace: MAPS[g.map].place,
+    team: isTeamId(g.team) ? g.team : "dresden",
+    teamName: TEAMS[isTeamId(g.team) ? g.team : "dresden"].name,
+    hasSave: saveBrief != null,
+    saveName: saveBrief?.name ?? "",
+    savePlace: saveBrief?.place ?? "",
+    saveNight: saveBrief?.sent ?? 0,
+    saveTeam: saveBrief?.teamName ?? "",
     selected: selectionOf(g),
   };
 }
@@ -274,6 +353,7 @@ export function subscribe(fn: () => void) {
 
 function emit(g: Game) {
   g.dirty = false;
+  if (quiet === 0) persistRun(g, true);
   hud = buildHud(g);
   if (quiet > 0) return;
   for (const fn of [...listeners]) fn();
@@ -291,10 +371,11 @@ function say(g: Game, text: string) {
   g.dirty = true;
 }
 
-function persistBest(n: number) {
+function persistBests(bests: Record<MapId, number>) {
   try {
     if (typeof localStorage === "undefined") return;
-    localStorage.setItem(BEST_KEY, String(n));
+    localStorage.setItem(BESTS_KEY, JSON.stringify(bests));
+    localStorage.setItem(BEST_KEY, String(bests.chicago ?? 0));
   } catch {
     /* private mode */
   }
@@ -302,10 +383,12 @@ function persistBest(n: number) {
 
 function remember(g: Game) {
   const reached = g.phase === "victory" ? WAVES.length : g.cleared;
-  if (reached > g.best) {
-    g.best = reached;
-    persistBest(g.best);
+  const prev = g.bests[g.map] ?? 0;
+  if (reached > prev) {
+    g.bests = { ...g.bests, [g.map]: reached };
+    persistBests(g.bests);
   }
+  g.best = Math.max(reached, g.bests[g.map] ?? 0);
 }
 
 function endGame(g: Game, phase: "victory" | "defeat") {
@@ -313,38 +396,211 @@ function endGame(g: Game, phase: "victory" | "defeat") {
   g.paused = false;
   g.placing = null;
   remember(g);
+  clearSave();
   g.events.push(phase);
   g.dirty = true;
 }
 
-export function loadBest(g: Game) {
+function isMapId(value: unknown): value is MapId {
+  return typeof value === "string" && MAP_ORDER.includes(value as MapId);
+}
+
+function readSave(): SaveFile | null {
+  try {
+    if (typeof localStorage === "undefined") return null;
+    const raw = localStorage.getItem(SAVE_KEY);
+    if (!raw) {
+      saveBrief = null;
+      return null;
+    }
+    const data = JSON.parse(raw) as SaveFile;
+    if (!data || data.v !== 1 || !isMapId(data.map)) {
+      saveBrief = null;
+      return null;
+    }
+    if (data.phase !== "prep" && data.phase !== "combat") return null;
+    if (!Array.isArray(data.towers) || !Array.isArray(data.enemies)) return null;
+    const team = isTeamId(data.team) ? data.team : "dresden";
+    saveBrief = {
+      map: data.map,
+      name: MAPS[data.map].name,
+      place: MAPS[data.map].place,
+      sent: Number(data.sent) || 0,
+      team,
+      teamName: TEAMS[team].name,
+    };
+    return data;
+  } catch {
+    saveBrief = null;
+    return null;
+  }
+}
+
+function writeSave(g: Game) {
+  const file: SaveFile = {
+    v: 1,
+    map: g.map,
+    team: g.team,
+    phase: g.phase === "combat" ? "combat" : "prep",
+    gold: g.gold,
+    lives: g.lives,
+    slain: g.slain,
+    cleared: g.cleared,
+    sent: g.sent,
+    paused: g.paused,
+    speed: g.speed,
+    time: g.time,
+    nextId: g.nextId,
+    spawnAcc: g.spawnAcc,
+    towers: g.towers.map((t) => ({ ...t, recoil: 0 })),
+    enemies: g.enemies.filter((e) => e.alive).map((e) => ({ ...e })),
+    spawnQueue: g.spawnQueue.map((job) => ({ ...job })),
+  };
   try {
     if (typeof localStorage === "undefined") return;
-    const n = Number(localStorage.getItem(BEST_KEY) || 0);
-    if (Number.isFinite(n) && n > g.best) {
-      g.best = n;
-      emit(g);
-    }
+    localStorage.setItem(SAVE_KEY, JSON.stringify(file));
+  } catch {
+    /* ignore quota */
+  }
+  saveBrief = {
+    map: g.map,
+    name: MAPS[g.map].name,
+    place: MAPS[g.map].place,
+    sent: g.sent,
+    team: g.team,
+    teamName: TEAMS[g.team].name,
+  };
+  lastPersist = g.time;
+}
+
+function clearSave() {
+  saveBrief = null;
+  lastPersist = -999;
+  try {
+    if (typeof localStorage === "undefined") return;
+    localStorage.removeItem(SAVE_KEY);
   } catch {
     /* ignore */
   }
 }
 
-export function startCase(g: Game) {
-  if (g.phase !== "menu") return;
-  g.phase = "prep";
-  say(g, "Choose a defender, then tap a sidewalk.");
+function persistRun(g: Game, force: boolean) {
+  if (quiet > 0) return;
+  if (g.phase !== "prep" && g.phase !== "combat") return;
+  if (!force && g.time - lastPersist < 1) return;
+  writeSave(g);
+}
+
+function applySave(g: Game, data: SaveFile) {
+  const bests = g.bests;
+  const fresh = createGame();
+  fresh.bests = bests;
+  const team = isTeamId(data.team) ? data.team : "dresden";
+  const mask = pathMask(data.map);
+  fresh.map = data.map;
+  fresh.team = team;
+  fresh.best = bests[data.map] ?? 0;
+  fresh.phase = data.phase;
+  fresh.gold = Math.max(0, Math.floor(data.gold) || 0);
+  fresh.lives = Math.max(0, Math.floor(data.lives) || 0);
+  fresh.slain = Math.max(0, Math.floor(data.slain) || 0);
+  fresh.cleared = Math.max(0, Math.floor(data.cleared) || 0);
+  fresh.sent = Math.max(0, Math.floor(data.sent) || 0);
+  fresh.paused = Boolean(data.paused);
+  fresh.speed = data.speed === 2 ? 2 : 1;
+  fresh.time = Number(data.time) || 0;
+  fresh.nextId = Math.max(1, Math.floor(data.nextId) || 1);
+  fresh.spawnAcc = Number(data.spawnAcc) || 0;
+  fresh.towers = data.towers.filter(
+    (t) =>
+      t &&
+      t.kind in TOWERS &&
+      TEAMS[team].units.includes(t.kind) &&
+      t.c >= 0 &&
+      t.r >= 0 &&
+      t.c < COLS &&
+      t.r < ROWS &&
+      !mask[t.r]?.[t.c],
+  );
+  fresh.enemies = data.enemies
+    .filter((e) => e && e.alive && e.kind in CREEPS)
+    .map((e) => ({
+      ...e,
+      stun: Number(e.stun) || 0,
+      dot: Number(e.dot) || 0,
+      dotT: Number(e.dotT) || 0,
+      siphon: Number(e.siphon) || 0,
+      dotHue: typeof e.dotHue === "string" ? e.dotHue : "",
+    }));
+  fresh.spawnQueue = data.spawnQueue.filter((job) => job && job.kind in CREEPS && job.left > 0);
+  Object.assign(g, fresh);
+}
+
+export function loadBest(g: Game) {
+  try {
+    if (typeof localStorage === "undefined") return;
+    const bests = emptyBests();
+    const raw = localStorage.getItem(BESTS_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw) as Partial<Record<MapId, number>>;
+      for (const id of MAP_ORDER) {
+        const n = Number(parsed?.[id]);
+        if (Number.isFinite(n) && n > 0) bests[id] = n;
+      }
+    } else {
+      const n = Number(localStorage.getItem(BEST_KEY) || 0);
+      if (Number.isFinite(n) && n > 0) bests.chicago = n;
+    }
+    g.bests = bests;
+    g.best = bests[g.map] ?? 0;
+    readSave();
+    emit(g);
+  } catch {
+    /* ignore */
+  }
+}
+
+export function newGame(g: Game, mapId: MapId = "chicago", teamId: TeamId = "dresden") {
+  const id = isMapId(mapId) ? mapId : "chicago";
+  const team = isTeamId(teamId) ? teamId : "dresden";
+  const bests = g.bests ?? emptyBests();
+  const fresh = createGame();
+  fresh.bests = bests;
+  fresh.map = id;
+  fresh.team = team;
+  fresh.best = bests[id] ?? 0;
+  fresh.phase = "prep";
+  Object.assign(g, fresh);
+  say(g, `${TEAMS[team].name} · ${MAPS[id].place}`);
+  emit(g);
+}
+
+export function startCase(g: Game, mapId?: MapId, teamId?: TeamId) {
+  newGame(g, mapId ?? "chicago", teamId ?? "dresden");
+}
+
+export function continueGame(g: Game) {
+  const data = readSave();
+  if (!data) return false;
+  applySave(g, data);
+  say(g, MAPS[g.map].place);
+  emit(g);
+  return true;
+}
+
+export function toMenu(g: Game) {
+  if (g.phase === "prep" || g.phase === "combat") writeSave(g);
+  g.phase = "menu";
+  g.paused = false;
+  g.placing = null;
+  g.selected = null;
+  g.hoverC = -1;
+  g.hoverR = -1;
   emit(g);
 }
 
 export function restart(g: Game) {
-  const best = Math.max(g.best, g.phase === "victory" ? WAVES.length : g.cleared);
-  const fresh = createGame();
-  fresh.best = best;
-  fresh.phase = "prep";
-  Object.assign(g, fresh);
-  say(g, "Another night. Same city.");
-  emit(g);
+  newGame(g, g.map, g.team);
 }
 
 export function selectKind(g: Game, kind: TowerId) {
@@ -388,7 +644,7 @@ export function togglePause(g: Game) {
 export function placementStatus(g: Game, c: number, r: number, kind: TowerId): PlaceResult {
   if (g.phase === "menu" || g.phase === "victory" || g.phase === "defeat") return "closed";
   if (c < 0 || r < 0 || c >= COLS || r >= ROWS) return "bounds";
-  if (PATH[r][c]) return "street";
+  if (pathMask(g.map)[r][c]) return "street";
   if (g.towers.some((t) => t.c === c && t.r === r)) return "held";
   if (g.gold < TOWERS[kind].cost) return "gold";
   return "ok";
@@ -544,24 +800,49 @@ function floatText(g: Game, x: number, y: number, text: string, color: string) {
   if (g.texts.length > 24) g.texts.splice(0, g.texts.length - 24);
 }
 
-function hurt(g: Game, enemy: Enemy, amount: number, pierce: boolean, slow: number) {
+function finishKill(g: Game, enemy: Enemy, siphon: number) {
   if (!enemy.alive || g.phase === "defeat") return;
+  enemy.alive = false;
+  enemy.hp = 0;
+  const bounty = CREEPS[enemy.kind].gold + Math.max(0, Math.round(siphon));
+  g.gold += bounty;
+  g.slain += 1;
+  g.events.push("kill");
+  floatText(g, enemy.x, enemy.y - 20, `+${bounty}`, "#e0b15a");
+  burst(g, enemy.x, enemy.y, CREEPS[enemy.kind].color, enemy.kind === "outsider" ? 18 : 8);
+  g.shake = Math.max(g.shake, enemy.kind === "outsider" ? 1 : 0.22);
+  g.dirty = true;
+}
+
+function hurt(
+  g: Game,
+  enemy: Enemy,
+  amount: number,
+  pierce: boolean,
+  slow: number,
+  stun: number,
+  dot: number,
+  dotTime: number,
+  siphon: number,
+  shatter: number,
+  hue: string,
+) {
+  if (!enemy.alive || g.phase === "defeat") return;
+  let hit = amount;
+  if (shatter > 0 && ((enemy.slow ?? 0) > 0 || (enemy.stun ?? 0) > 0)) hit *= 1 + shatter;
   const armor = pierce ? 0 : CREEPS[enemy.kind].armor;
-  const dealt = Math.max(1, Math.round(amount - armor));
+  const dealt = Math.max(1, Math.round(hit - armor));
   enemy.hp -= dealt;
   enemy.flash = 0.1;
   if (slow > 0) enemy.slow = Math.max(enemy.slow, slow);
-  if (enemy.hp <= 0) {
-    enemy.alive = false;
-    const bounty = CREEPS[enemy.kind].gold;
-    g.gold += bounty;
-    g.slain += 1;
-    g.events.push("kill");
-    floatText(g, enemy.x, enemy.y - 20, `+${bounty}`, "#e0b15a");
-    burst(g, enemy.x, enemy.y, CREEPS[enemy.kind].color, enemy.kind === "outsider" ? 18 : 8);
-    g.shake = Math.max(g.shake, enemy.kind === "outsider" ? 1 : 0.22);
-    g.dirty = true;
+  if (stun > 0) enemy.stun = Math.max(enemy.stun ?? 0, stun);
+  if (dot > 0 && dotTime > 0 && (dot >= (enemy.dot ?? 0) || (enemy.dotT ?? 0) <= 0)) {
+    enemy.dot = dot;
+    enemy.dotT = dotTime;
+    enemy.dotHue = hue;
+    enemy.siphon = siphon;
   }
+  if (enemy.hp <= 0) finishKill(g, enemy, siphon);
 }
 
 function leak(g: Game, enemy: Enemy) {
@@ -602,25 +883,36 @@ function pickTarget(g: Game, tower: Tower, rangePx: number): Enemy | null {
   return best;
 }
 
-function cellCenter(c: number, r: number) {
-  return { x: (c + 0.5) * CELL, y: (r + 0.5) * CELL };
-}
-
 function fire(g: Game, tower: Tower, target: Enemy, stats: CombatStats) {
   const origin = cellCenter(tower.c, tower.r);
+  const hue = TOWERS[tower.kind].color;
   tower.angle = Math.atan2(target.y - origin.y, target.x - origin.x);
   tower.recoil = 0.12;
   g.events.push(`shoot:${tower.kind}`);
   if (stats.instant) {
-    hurt(g, target, stats.damage, false, 0);
+    hurt(g, target, stats.damage, false, stats.slow, stats.stun, stats.dot, stats.dotTime, stats.siphon, stats.shatter, hue);
     const r2 = stats.splash * CELL * (stats.splash * CELL);
     for (const enemy of g.enemies) {
       if (!enemy.alive || enemy.id === target.id) continue;
       const dx = enemy.x - target.x;
       const dy = enemy.y - target.y;
-      if (dx * dx + dy * dy <= r2) hurt(g, enemy, stats.damage, false, 0);
+      if (dx * dx + dy * dy <= r2) {
+        hurt(
+          g,
+          enemy,
+          stats.damage,
+          false,
+          stats.slow,
+          stats.stun * 0.45,
+          stats.dot * 0.65,
+          stats.dotTime,
+          0,
+          stats.shatter,
+          hue,
+        );
+      }
     }
-    ring(g, target.x, target.y, TOWERS[tower.kind].color, CELL * 0.25);
+    ring(g, target.x, target.y, hue, CELL * 0.25);
     g.shake = Math.max(g.shake, 0.12);
     return;
   }
@@ -639,7 +931,12 @@ function fire(g: Game, tower: Tower, target: Enemy, stats: CombatStats) {
     pierce: stats.pierce,
     slow: stats.slow,
     splash: stats.splash,
-    color: TOWERS[tower.kind].color,
+    stun: stats.stun,
+    dot: stats.dot,
+    dotTime: stats.dotTime,
+    siphon: stats.siphon,
+    shatter: stats.shatter,
+    color: hue,
     targetId: target.id,
   });
 }
@@ -664,7 +961,19 @@ function distPointSeg(
 }
 
 function impact(g: Game, shot: Projectile, hit: Enemy) {
-  hurt(g, hit, shot.damage, shot.pierce, shot.slow);
+  hurt(
+    g,
+    hit,
+    shot.damage,
+    shot.pierce,
+    shot.slow,
+    shot.stun,
+    shot.dot,
+    shot.dotTime,
+    shot.siphon,
+    shot.shatter,
+    shot.color,
+  );
   if (shot.splash > 0) {
     const r = shot.splash * CELL;
     const r2 = r * r;
@@ -672,7 +981,21 @@ function impact(g: Game, shot: Projectile, hit: Enemy) {
       if (!enemy.alive || enemy.id === hit.id) continue;
       const dx = enemy.x - hit.x;
       const dy = enemy.y - hit.y;
-      if (dx * dx + dy * dy <= r2) hurt(g, enemy, shot.damage * 0.65, shot.pierce, 0);
+      if (dx * dx + dy * dy <= r2) {
+        hurt(
+          g,
+          enemy,
+          shot.damage * 0.65,
+          shot.pierce,
+          shot.slow,
+          shot.stun * 0.45,
+          shot.dot * 0.65,
+          shot.dotTime,
+          0,
+          shot.shatter,
+          shot.color,
+        );
+      }
     }
   }
   burst(g, hit.x, hit.y, shot.color, 5);
@@ -680,7 +1003,7 @@ function impact(g: Game, shot: Projectile, hit: Enemy) {
 
 function spawnEnemy(g: Game, kind: CreepId) {
   const def = CREEPS[kind];
-  const pts = waypointXY();
+  const pts = waypointXY(g.map);
   const pressure =
     1 + Math.max(0, g.sent - 1) * (kind === "outsider" ? 0.04 : 0.055);
   const hp = Math.round(def.hp * pressure);
@@ -694,6 +1017,11 @@ function spawnEnemy(g: Game, kind: CreepId) {
     hp,
     maxHp: hp,
     slow: 0,
+    stun: 0,
+    dot: 0,
+    dotT: 0,
+    siphon: 0,
+    dotHue: "",
     face: def.artFace,
     flash: 0,
     alive: true,
@@ -710,7 +1038,7 @@ function spawnEnemy(g: Game, kind: CreepId) {
 
 function simulate(g: Game, dt: number) {
   if (g.phase !== "combat") return;
-  const pts = waypointXY();
+  const pts = waypointXY(g.map);
   g.spawnAcc += dt;
   const head = g.spawnQueue[0];
   if (head) {
@@ -730,8 +1058,17 @@ function simulate(g: Game, dt: number) {
   for (const enemy of g.enemies) {
     if (!enemy.alive) continue;
     if (g.phase !== "combat") break;
+    if ((enemy.stun ?? 0) > 0) enemy.stun -= dt;
     if (enemy.slow > 0) enemy.slow -= dt;
     if (enemy.flash > 0) enemy.flash -= dt;
+    if ((enemy.dotT ?? 0) > 0 && enemy.alive) {
+      enemy.hp -= (enemy.dot ?? 0) * dt;
+      enemy.dotT -= dt;
+      if (enemy.hp <= 0) {
+        finishKill(g, enemy, enemy.siphon ?? 0);
+        continue;
+      }
+    }
     const target = pts[enemy.wp];
     if (!target) {
       leak(g, enemy);
@@ -740,7 +1077,8 @@ function simulate(g: Game, dt: number) {
     const dx = target.x - enemy.x;
     const dy = target.y - enemy.y;
     const dist = Math.hypot(dx, dy);
-    const speed = CREEPS[enemy.kind].speed * CELL * (enemy.slow > 0 ? 0.5 : 1);
+    const frozen = (enemy.stun ?? 0) > 0;
+    const speed = frozen ? 0 : CREEPS[enemy.kind].speed * CELL * (enemy.slow > 0 ? 0.5 : 1);
     const step = speed * dt;
     if (dist <= step || dist < 0.8) {
       enemy.along += dist;
@@ -867,6 +1205,7 @@ export function step(g: Game, dt: number) {
       left -= slice;
     }
   }
+  persistRun(g, false);
   if (g.dirty) emit(g);
 }
 

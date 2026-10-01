@@ -3,6 +3,8 @@ let master: GainNode | null = null;
 let sfxBus: GainNode | null = null;
 let musicBus: GainNode | null = null;
 let muted = false;
+let volume = 0.85;
+const AUDIO_KEY = "ward-of-chicago-audio";
 let noiseBuf: AudioBuffer | null = null;
 let wired = false;
 
@@ -12,22 +14,58 @@ function contextCtor(): typeof AudioContext | null {
   return window.AudioContext || w.webkitAudioContext || null;
 }
 
+function clampVolume(value: number) {
+  if (!Number.isFinite(value)) return 0.85;
+  return Math.min(1, Math.max(0, value));
+}
+
+export function loadAudioPrefs() {
+  try {
+    if (typeof localStorage === "undefined") return { volume, muted };
+    const raw = localStorage.getItem(AUDIO_KEY);
+    if (raw) {
+      const data = JSON.parse(raw) as { volume?: number; muted?: boolean };
+      if (typeof data.volume === "number") volume = clampVolume(data.volume);
+      if (typeof data.muted === "boolean") muted = data.muted;
+    }
+  } catch {
+    /* ignore */
+  }
+  return { volume, muted };
+}
+
+function persistAudio() {
+  try {
+    if (typeof localStorage === "undefined") return;
+    localStorage.setItem(AUDIO_KEY, JSON.stringify({ volume, muted }));
+  } catch {
+    /* ignore */
+  }
+}
+
+function applyMaster() {
+  if (!ctx || !master) return;
+  const next = muted || volume <= 0.001 ? 0 : volume;
+  master.gain.setTargetAtTime(next, ctx.currentTime, 0.03);
+}
+
 export function unlockAudio() {
   const AC = contextCtor();
   if (!AC) return;
+  loadAudioPrefs();
   if (!ctx) {
     ctx = new AC({ latencyHint: "interactive" });
     master = ctx.createGain();
     sfxBus = ctx.createGain();
     musicBus = ctx.createGain();
-    master.gain.value = muted ? 0 : 0.9;
+    master.gain.value = muted || volume <= 0.001 ? 0 : volume;
     sfxBus.gain.value = 0.75;
     musicBus.gain.value = 0;
     sfxBus.connect(master);
     musicBus.connect(master);
     master.connect(ctx.destination);
     startPad();
-    musicBus.gain.linearRampToValueAtTime(muted ? 0 : 0.2, ctx.currentTime + 1.6);
+    musicBus.gain.linearRampToValueAtTime(0.22, ctx.currentTime + 1.6);
   }
   if (ctx.state === "suspended") void ctx.resume();
   if (!wired) {
@@ -63,10 +101,22 @@ function startPad() {
   }
 }
 
+export function setVolume(next: number) {
+  volume = clampVolume(next);
+  muted = volume <= 0.001;
+  applyMaster();
+  persistAudio();
+}
+
+export function getVolume() {
+  return volume;
+}
+
 export function setMuted(next: boolean) {
   muted = next;
-  if (!ctx || !master) return;
-  master.gain.setTargetAtTime(next ? 0 : 0.9, ctx.currentTime, 0.03);
+  if (!next && volume <= 0.001) volume = 0.85;
+  applyMaster();
+  persistAudio();
 }
 
 export function isMuted() {
@@ -196,6 +246,7 @@ export function playEvent(name: string) {
       tone(174, 0.28, "sine", 0.05);
       break;
     default:
+      if (name.startsWith("shoot:")) tone(420 * wobble, 0.06, "sine", 0.045);
       break;
   }
 }
