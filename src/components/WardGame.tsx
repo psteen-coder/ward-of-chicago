@@ -138,32 +138,13 @@ function fmt(n: number) {
   return rounded.toFixed(2).replace(/\.?0+$/, "");
 }
 
-function nightLabel(hud: Hud, duel: DuelHud | null) {
-  if (hud.phase === "menu") return "Single player, or a local battle";
-  if (duel) {
-    const street = duel.watch === "rival" ? "their street" : "your street";
-    if (hud.phase === "victory") return `${duel.youTeam} broke ${duel.rivalTeam}`;
-    if (hud.phase === "defeat") return `${duel.rivalTeam} broke your door`;
-    return `${duel.youTeam} vs ${duel.rivalTeam} · ${street}`;
+function waveStatus(hud: Hud) {
+  if (hud.mode === "endless") {
+    if (hud.phase === "combat") return `Night ${hud.sent}`;
+    return hud.sent <= 0 ? "Night 1" : `Night ${hud.sent + 1}`;
   }
-  const place = `${hud.teamName} · ${hud.mapPlace}`;
-  const tag = hud.mode === "endless" ? "Endless" : hud.mode === "speed" ? "Speed" : "Standard";
-  if (hud.phase === "victory") {
-    return hud.mode === "speed" ? `${place} · Speed clear` : `${place} · Dawn held`;
-  }
-  if (hud.phase === "defeat") {
-    return hud.mode === "endless"
-      ? `${place} · Fell on night ${hud.sent}`
-      : `${place} · The threshold broke`;
-  }
-  if (hud.phase === "combat") {
-    return hud.mode === "endless"
-      ? `${place} · ${tag} · Night ${hud.sent}`
-      : `${place} · ${tag} · Night ${hud.sent} of ${hud.total}`;
-  }
-  if (hud.sent === 0) return `${place} · ${tag} · Night 1 is waiting`;
-  if (hud.mode === "endless") return `${place} · ${tag} · Night ${hud.sent} held`;
-  return `${place} · ${tag} · Night ${hud.sent} held · next ${Math.min(hud.total, hud.sent + 1)}`;
+  const night = hud.phase === "combat" ? hud.sent : Math.min(hud.total, Math.max(1, hud.sent + 1));
+  return `Night ${night}/${hud.total || 10}`;
 }
 
 function loadArt(art: ArtBook) {
@@ -210,6 +191,11 @@ export function WardGame() {
   const stageRef = useRef<HTMLDivElement>(null);
   const artRef = useRef<ArtBook>(emptyArt());
   const viewRef = useRef({ cssW: 1, cssH: 1, dpr: 1 });
+  const dismissTipRef = useRef<() => void>(() => {});
+  const tipLockRef = useRef(false);
+  const hideTipTimer = useRef<number | null>(null);
+  const [tip, setTip] = useState<TowerId | null>(null);
+  const [tipLock, setTipLock] = useState(false);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -274,6 +260,7 @@ export function WardGame() {
       }
       if (event.code === "Escape") {
         clearSelect(g);
+        dismissTipRef.current();
         return;
       }
       if (event.code === "KeyU") {
@@ -318,10 +305,41 @@ export function WardGame() {
     return { c: Math.floor(x / CELL), r: Math.floor((y - TOP_PAD) / CELL) };
   };
 
-  const placing = hud.placing ? TOWERS[hud.placing] : null;
-  const placingStats = hud.placing ? combatStats(hud.placing, 1) : null;
   const duel = getDuel();
   const canSend = !duel && hud.phase === "prep" && (hud.mode === "endless" || hud.sent < hud.total);
+  const playing = hud.phase === "prep" || hud.phase === "combat";
+
+  const dismissTip = () => {
+    if (hideTipTimer.current != null) window.clearTimeout(hideTipTimer.current);
+    hideTipTimer.current = null;
+    tipLockRef.current = false;
+    setTipLock(false);
+    setTip(null);
+  };
+  dismissTipRef.current = dismissTip;
+
+  const showTip = (kind: TowerId, lock: boolean) => {
+    if (hideTipTimer.current != null) window.clearTimeout(hideTipTimer.current);
+    hideTipTimer.current = null;
+    setTip(kind);
+    if (lock) {
+      tipLockRef.current = true;
+      setTipLock(true);
+    }
+  };
+
+  const queueHideTip = () => {
+    if (tipLockRef.current) return;
+    if (hideTipTimer.current != null) window.clearTimeout(hideTipTimer.current);
+    hideTipTimer.current = window.setTimeout(() => setTip(null), 180);
+  };
+
+  const pickTower = (kind: TowerId) => {
+    unlockAudio();
+    if (tipLockRef.current) dismissTip();
+    if (getDuel()) setWatch("you");
+    selectKind(ensureGame(), kind);
+  };
 
   return (
     <div
@@ -329,44 +347,16 @@ export function WardGame() {
       onPointerDown={() => unlockAudio()}
     >
       <div className="flex h-full min-h-0 flex-col" inert={hud.phase === "menu" ? true : undefined}>
-      <header className="safe-top safe-x flex shrink-0 items-center gap-2 border-b border-line py-2">
-        <div className="min-w-0 flex-1">
-          <h1 className="truncate font-display text-xs tracking-wide text-primary">
-            Ward of Chicago
-          </h1>
-          <p className="truncate text-sm text-muted">{nightLabel(hud, duel)}</p>
-          <div className="mt-1 flex gap-1" aria-hidden>
-            {duel && hud.phase !== "menu" ? (
-              <span className={`text-xs ${duel.rivalLives <= 5 ? "text-danger" : "text-muted"}`}>
-                Their door {duel.rivalLives}
-                {duel.rivalLeft > 0 ? ` · ${duel.rivalLeft} walking` : ""}
-              </span>
-            ) : hud.mode === "endless" || hud.total <= 0 ? (
-              <span className="text-xs text-muted">
-                {hud.cleared > 0 ? `Night ${hud.cleared} finished` : "No night finished yet"}
-              </span>
-            ) : (
-              Array.from({ length: hud.total }, (_, i) => {
-                const done = i < hud.cleared;
-                const now = hud.phase === "combat" && i === hud.sent - 1;
-                return (
-                  <span
-                    key={i}
-                    className={`h-1.5 min-w-0 flex-1 rounded-full ${done ? "bg-primary" : now ? "bg-ward" : "bg-line"}`}
-                  />
-                );
-              })
-            )}
-          </div>
-        </div>
-        {hud.phase === "prep" || hud.phase === "combat" ? (
+      <header className="safe-top safe-x flex shrink-0 items-center gap-1 border-b border-line bg-surface py-1.5">
+        {playing ? (
           <button
             id="open-menu"
             type="button"
-            className="grid size-11 shrink-0 place-items-center rounded-lg border border-line bg-surface"
+            className="grid size-10 shrink-0 place-items-center rounded-lg border border-line"
             aria-label="Main menu"
             onClick={() => {
               unlockAudio();
+              dismissTip();
               setPanel("main");
               parkDuel(ensureGame());
               toMenu(ensureGame());
@@ -374,25 +364,61 @@ export function WardGame() {
           >
             <Menu className="size-5" aria-hidden />
           </button>
+        ) : (
+          <span className="size-10 shrink-0" aria-hidden />
+        )}
+        <div className="flex min-w-0 flex-1 items-center gap-2 overflow-hidden">
+          <span
+            className="flex shrink-0 items-center gap-1"
+            aria-label={`${hud.lives} of ${hud.livesMax} lives remaining`}
+          >
+            <Heart className="size-4 text-danger" aria-hidden />
+            <span className={`num text-sm font-semibold ${hud.lives <= 5 ? "text-danger" : ""}`}>
+              {hud.lives}
+            </span>
+          </span>
+          <span className="flex shrink-0 items-center gap-1" aria-label={`${hud.gold} coin`}>
+            <Coins className="size-4 text-primary" aria-hidden />
+            <span className="num text-sm font-semibold">{hud.gold}</span>
+          </span>
+          {duel && playing ? (
+            <span
+              className={`flex shrink-0 items-center gap-1 ${duel.rivalLives <= 5 ? "text-danger" : ""}`}
+              aria-label={`Their door, ${duel.rivalLives} lives`}
+            >
+              <span className="text-[11px] text-muted">Them</span>
+              <Heart className="size-4 text-ward" aria-hidden />
+              <span className="num text-sm font-semibold">{duel.rivalLives}</span>
+            </span>
+          ) : (
+            <span className="truncate text-sm font-semibold">{waveStatus(hud)}</span>
+          )}
+        </div>
+        {duel && playing ? (
+          <div className="flex shrink-0 rounded-lg border border-line p-0.5" role="group" aria-label="Which street">
+            <button
+              id="watch-you"
+              type="button"
+              aria-pressed={duel.watch === "you"}
+              className={`h-8 rounded-md px-2 text-xs font-semibold ${duel.watch === "you" ? "bg-surface-2 text-fg" : "text-muted"}`}
+              onClick={() => setWatch("you")}
+            >
+              You
+            </button>
+            <button
+              id="watch-rival"
+              type="button"
+              aria-pressed={duel.watch === "rival"}
+              className={`h-8 rounded-md px-2 text-xs font-semibold ${duel.watch === "rival" ? "bg-surface-2 text-fg" : "text-muted"}`}
+              onClick={() => setWatch("rival")}
+            >
+              Them
+            </button>
+          </div>
         ) : null}
-        <div
-          className="flex shrink-0 items-center gap-1.5 rounded-lg border border-line bg-surface px-2 py-1.5"
-          aria-label={`${hud.gold} coin`}
-        >
-          <Coins className="size-5 text-primary" aria-hidden />
-          <span className="num text-base">{hud.gold}</span>
-        </div>
-        <div
-          className={`flex shrink-0 items-center gap-1.5 rounded-lg border border-line bg-surface px-2 py-1.5 ${hud.lives <= 5 ? "text-danger" : ""}`}
-          aria-label={`${hud.lives} of ${hud.livesMax} lives remaining`}
-        >
-          <Heart className="size-5 text-danger" aria-hidden />
-          <span className="num text-base">{hud.lives}</span>
-          <span className="text-xs text-muted">/{hud.livesMax}</span>
-        </div>
         <button
           type="button"
-          className="grid size-11 shrink-0 place-items-center rounded-lg border border-line bg-surface"
+          className="grid size-10 shrink-0 place-items-center rounded-lg border border-line"
           aria-label={muted ? "Unmute" : "Mute"}
           aria-pressed={muted}
           onClick={() => {
@@ -403,19 +429,17 @@ export function WardGame() {
             setVolumeUi(Math.round(getVolume() * 100));
           }}
         >
-          {muted ? (
-            <VolumeX className="size-5" aria-hidden />
-          ) : (
-            <Volume2 className="size-5" aria-hidden />
-          )}
+          {muted ? <VolumeX className="size-5" aria-hidden /> : <Volume2 className="size-5" aria-hidden />}
         </button>
       </header>
 
-      <div className="flex min-h-0 flex-1 flex-col desk:flex-row">
-        <div
-          ref={stageRef}
-          className="relative flex min-h-0 flex-1 items-center justify-center bg-bg"
-        >
+      <div
+        ref={stageRef}
+        className="relative flex min-h-0 flex-1 items-center justify-center bg-bg"
+        onPointerDown={() => {
+          if (tip || tipLockRef.current) dismissTip();
+        }}
+      >
           <canvas
             id="board"
             ref={canvasRef}
@@ -442,11 +466,6 @@ export function WardGame() {
               clearSelect(ensureGame());
             }}
           />
-          {duel && hud.phase !== "menu" ? (
-            <p className="pointer-events-none absolute bottom-3 left-3 z-10 rounded-full border border-line bg-surface px-3 py-1 text-xs text-muted">
-              {duel.watch === "rival" ? `${duel.rivalTeam}'s street` : "Your street"}
-            </p>
-          ) : null}
           {hud.banner ? (
             <p
               key={hud.bannerSeq}
@@ -455,216 +474,125 @@ export function WardGame() {
               {hud.banner}
             </p>
           ) : null}
-        </div>
-
-        <aside className={`flex min-h-0 w-full shrink-0 flex-col overflow-hidden border-t border-line desk:h-auto desk:max-h-none desk:w-80 desk:flex-none desk:border-t-0 desk:border-l ${duel ? "h-80" : "h-72"}`}>
-          <div className="shrink-0 px-3 pt-3">
-            {duel && hud.phase !== "menu" ? (
-              <div className="mb-3">
-                <div className="flex gap-2">
-                  <button
-                    id="watch-you"
-                    type="button"
-                    aria-pressed={duel.watch === "you"}
-                    className={`min-h-11 flex-1 rounded-lg border text-sm font-semibold ${duel.watch === "you" ? "border-primary bg-surface-2" : "border-line"}`}
-                    onClick={() => setWatch("you")}
-                  >
-                    Your street
-                  </button>
-                  <button
-                    id="watch-rival"
-                    type="button"
-                    aria-pressed={duel.watch === "rival"}
-                    className={`min-h-11 flex-1 rounded-lg border text-sm font-semibold ${duel.watch === "rival" ? "border-primary bg-surface-2" : "border-line"}`}
-                    onClick={() => setWatch("rival")}
-                  >
-                    Their street
-                  </button>
-                </div>
-                <p className={`mt-2 text-sm ${duel.rivalLives <= 5 ? "text-danger" : "text-fg"}`}>
-                  {duel.rivalTeam} · {duel.rivalLives} lives · {duel.rivalGold} coin · {duel.rivalLeft} walking
-                </p>
-                <p className="mt-1 text-xs text-muted">{duel.lastPush}</p>
-              </div>
-            ) : null}
-            <p className="text-xs tracking-widest text-muted">{duel ? "YOUR COURT" : hud.teamName.toUpperCase()}</p>
-            <p className="mt-1 text-sm text-muted">
-              {duel
-                ? `${hud.teamName} · ${duel.youLeft} on your road`
-                : hud.phase === "combat"
-                  ? `${hud.remaining} still on the street${hud.mode === "speed" ? " · the next night is already walking" : ""}`
-                  : hud.nextBlurb
-                    ? `Next: ${hud.nextBlurb}`
-                    : "The street is quiet"}
-            </p>
-            {duel && hud.phase !== "menu" ? (
-              <p className="mt-1 text-xs text-muted">
-                Earned {hud.goldEarned} · pushed {duel.pushSpent} · {formatClock(hud.combatTime)}
-              </p>
-            ) : hud.phase === "prep" || hud.phase === "combat" ? (
-              <p className="mt-1 text-xs text-muted">
-                Earned {hud.goldEarned} · lost {hud.livesLost}{" "}
-                {hud.livesLost === 1 ? "life" : "lives"} · {formatClock(hud.combatTime)}
-                {hud.phase === "combat" ? ` · this night ${formatClock(hud.nightClock)}` : ""}
-              </p>
-            ) : null}
-          </div>
-          <div className="flex shrink-0 gap-2 overflow-x-auto p-3 desk:flex-col desk:overflow-visible">
-            {TEAMS[hud.team].units.map((kind, index) => {
-              const def = TOWERS[kind];
-              const active = hud.placing === kind;
-              const poor = hud.gold < def.cost;
-              return (
-                <button
-                  key={kind}
-                  type="button"
-                  aria-pressed={active}
-                  onClick={() => {
-                    unlockAudio();
-                    if (getDuel()) setWatch("you");
-                    selectKind(ensureGame(), kind);
-                  }}
-                  className={`flex w-44 shrink-0 gap-2 rounded-xl border p-2 text-left desk:w-auto ${
-                    active ? "border-primary bg-surface-2" : "border-line bg-surface"
-                  }`}
-                >
-                  <span className="relative grid size-12 shrink-0 place-items-center overflow-hidden rounded-lg bg-bg">
-                    <span className={`absolute inset-2 rounded-full ${def.swatch}`} />
-                    <img
-                      src={`/game/${kind}.png`}
-                      alt=""
-                      draggable={false}
-                      className="relative size-12 object-contain"
-                      onError={(event) => {
-                        event.currentTarget.style.visibility = "hidden";
-                      }}
-                    />
-                  </span>
-                  <span className="min-w-0 flex-1">
-                    <span className="flex items-baseline justify-between gap-2">
-                      <span className="truncate text-sm font-semibold">{def.name}</span>
-                      <span className={`num text-sm ${poor ? "text-danger" : "text-primary"}`}>
-                        {def.cost}
-                      </span>
-                    </span>
-                    <span className="mt-0.5 block truncate text-xs text-muted">
-                      {def.craft}
-                      <span className="hidden text-muted sm:inline"> · {index + 1}</span>
-                    </span>
-                    <span className="mt-0.5 block truncate text-xs text-muted">{def.special}</span>
-                  </span>
-                </button>
-              );
-            })}
-          </div>
-          <div className="min-h-0 flex-1 overflow-y-auto border-t border-line p-3">
-            {hud.selected ? (
-              <Inspector hud={hud} />
-            ) : placing && placingStats ? (
-              <div>
-                <p className="font-display text-lg">{placing.name}</p>
-                <p className="text-sm text-primary">{placing.craft}</p>
-                <p className="mt-2 text-sm leading-relaxed text-muted">{placing.blurb}</p>
-                <StatLine label="Damage" value={String(placingStats.damage)} />
-                <StatLine label="Fire rate" value={`${fmt(placingStats.rate)} /s`} />
-                <StatLine label="Reach" value={`${fmt(placingStats.range)} squares`} />
-                <p className="mt-3 text-sm text-fg">Tap a lit sidewalk to post them.</p>
-              </div>
-            ) : (
-              <p className="text-sm leading-relaxed text-muted">
-                Off the road. Each ground bends a different way. Hone a defender to raise
-                damage and rate of fire.
-              </p>
-            )}
-          </div>
-        </aside>
       </div>
 
-      <footer className="safe-pad safe-x flex shrink-0 flex-wrap items-center gap-2 border-t border-line bg-surface pt-2">
-        {duel && hud.phase !== "menu" ? (
-          <div className="grid min-w-0 flex-1 grid-cols-2 gap-2 sm:max-w-md">
-            {PUSHES.map((push) => {
-              const poor = hud.gold < push.cost;
-              const live = hud.phase === "combat" && !hud.paused;
-              return (
-                <button
-                  key={push.id}
-                  id={`push-${push.id}`}
-                  type="button"
-                  disabled={!live || poor}
-                  className="flex min-h-11 items-center justify-between gap-2 rounded-xl border border-line bg-bg px-3 text-left text-sm disabled:opacity-40"
-                  onClick={() => {
-                    unlockAudio();
-                    pushCreep(ensureGame(), push.id);
-                  }}
-                >
-                  <span className="truncate">{push.label}</span>
-                  <span className={`num shrink-0 ${poor ? "text-danger" : "text-primary"}`}>{push.cost}</span>
-                </button>
-              );
-            })}
+      <footer className="safe-pad safe-x shrink-0 border-t border-line bg-surface">
+        <div className="mx-auto flex w-full max-w-3xl flex-col">
+          {tip ? (
+            <TowerCard
+              kind={tip}
+              locked={tipLock}
+              onHold={() => {
+                if (hideTipTimer.current != null) window.clearTimeout(hideTipTimer.current);
+                hideTipTimer.current = null;
+              }}
+              onLeave={queueHideTip}
+              onDismiss={dismissTip}
+            />
+          ) : null}
+          {hud.selected && !tip ? <SelectedBar hud={hud} /> : null}
+          <div className="flex gap-1 overflow-x-auto py-1.5" role="toolbar" aria-label="Defenders">
+            {TEAMS[hud.team].units.map((kind) => (
+              <TowerPick
+                key={kind}
+                kind={kind}
+                active={hud.placing === kind}
+                inspected={tip === kind}
+                poor={hud.gold < TOWERS[kind].cost}
+                onPick={() => pickTower(kind)}
+                onHoverStart={() => showTip(kind, false)}
+                onHoverEnd={queueHideTip}
+                onLongPress={() => showTip(kind, true)}
+              />
+            ))}
           </div>
-        ) : (
-        <button
-          id="send-night"
-          type="button"
-          disabled={!canSend}
-          className="min-h-11 flex-1 rounded-xl bg-primary px-3 font-semibold text-primary-fg disabled:opacity-40"
-          onClick={() => {
-            unlockAudio();
-            sendWave(ensureGame());
-          }}
-        >
-          {hud.mode === "speed" && hud.phase === "combat"
-            ? hud.paused
-              ? "Holding the street"
-              : "Next night starts itself"
-            : canSend
-              ? hud.sent === 0
-                ? "Send the night"
-                : "Send the next night"
-              : hud.phase === "combat"
-                ? hud.paused
-                  ? "Holding the street"
-                  : "They're in the street"
-                : "Send the night"}
-        </button>
-        )}
-        <button
-          type="button"
-          className="min-h-11 min-w-11 rounded-xl border border-line px-3"
-          aria-label={hud.speed === 1 ? "Double speed" : "Normal speed"}
-          aria-pressed={hud.speed === 2}
-          onClick={() => {
-            unlockAudio();
-            toggleSpeed(ensureGame());
-          }}
-        >
-          <span className="num">{hud.speed}×</span>
-        </button>
-        {hud.phase === "combat" ? (
-          <button
-            type="button"
-            className="grid size-11 place-items-center rounded-xl border border-line"
-            aria-label={hud.paused ? "Resume" : "Hold"}
-            aria-pressed={hud.paused}
-            onClick={() => {
-              unlockAudio();
-              togglePause(ensureGame());
-            }}
-          >
-            {hud.paused ? <Play className="size-5" aria-hidden /> : <Pause className="size-5" aria-hidden />}
-          </button>
-        ) : null}
-        {hud.placing ? (
-          <button
-            type="button"
-            className="min-h-11 rounded-xl border border-line px-3"
-            onClick={() => clearSelect(ensureGame())}
-          >
-            Cancel
-          </button>
-        ) : null}
+          <div className="flex items-center gap-1.5 pb-1.5">
+            {duel && playing ? (
+              <div className="flex min-w-0 flex-1 gap-1.5 overflow-x-auto">
+                {PUSHES.map((push) => {
+                  const poor = hud.gold < push.cost;
+                  const live = hud.phase === "combat" && !hud.paused;
+                  return (
+                    <button
+                      key={push.id}
+                      id={`push-${push.id}`}
+                      type="button"
+                      disabled={!live || poor}
+                      className="flex h-10 shrink-0 items-center gap-2 rounded-lg border border-line bg-bg px-2.5 text-sm whitespace-nowrap disabled:opacity-40"
+                      onClick={() => {
+                        unlockAudio();
+                        pushCreep(ensureGame(), push.id);
+                      }}
+                    >
+                      <span>{push.label}</span>
+                      <span className={`num ${poor ? "text-danger" : "text-primary"}`}>{push.cost}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            ) : (
+              <button
+                id="send-night"
+                type="button"
+                disabled={!canSend}
+                className="h-10 min-w-0 flex-1 truncate rounded-xl bg-primary px-3 text-sm font-semibold text-primary-fg disabled:opacity-40"
+                onClick={() => {
+                  unlockAudio();
+                  sendWave(ensureGame());
+                }}
+              >
+                {hud.mode === "speed" && hud.phase === "combat"
+                  ? hud.paused
+                    ? "Holding the street"
+                    : "Next night starts itself"
+                  : canSend
+                    ? hud.sent === 0
+                      ? "Send the night"
+                      : "Send the next night"
+                    : hud.phase === "combat"
+                      ? hud.paused
+                        ? "Holding the street"
+                        : "They're in the street"
+                      : "Send the night"}
+              </button>
+            )}
+            <button
+              type="button"
+              className="grid size-10 shrink-0 place-items-center rounded-xl border border-line"
+              aria-label={hud.speed === 1 ? "Double speed" : "Normal speed"}
+              aria-pressed={hud.speed === 2}
+              onClick={() => {
+                unlockAudio();
+                toggleSpeed(ensureGame());
+              }}
+            >
+              <span className="num text-sm">{hud.speed}×</span>
+            </button>
+            {hud.phase === "combat" ? (
+              <button
+                type="button"
+                className="grid size-10 shrink-0 place-items-center rounded-xl border border-line"
+                aria-label={hud.paused ? "Resume" : "Hold"}
+                aria-pressed={hud.paused}
+                onClick={() => {
+                  unlockAudio();
+                  togglePause(ensureGame());
+                }}
+              >
+                {hud.paused ? <Play className="size-5" aria-hidden /> : <Pause className="size-5" aria-hidden />}
+              </button>
+            ) : null}
+            {hud.placing ? (
+              <button
+                type="button"
+                className="h-10 shrink-0 rounded-xl border border-line px-2.5 text-sm"
+                onClick={() => clearSelect(ensureGame())}
+              >
+                Cancel
+              </button>
+            ) : null}
+          </div>
+        </div>
       </footer>
 
       {hud.phase === "victory" || hud.phase === "defeat" ? (
@@ -1359,87 +1287,228 @@ function ScoreCard({ hud }: { hud: Hud }) {
   );
 }
 
-function StatLine({ label, value }: { label: string; value: string }) {
+function extraLine(stats: ReturnType<typeof combatStats>) {
+  const bits: string[] = [];
+  if (stats.splash > 0) bits.push(`splash ${fmt(stats.splash)}`);
+  if (stats.slow > 0) bits.push(`chill ${fmt(stats.slow)}s`);
+  if (stats.pierce) bits.push("ignores armor");
+  if (stats.dot > 0) bits.push(`${fmt(stats.dot)} for ${fmt(stats.dotTime)}s`);
+  if (stats.stun > 0) bits.push(`root ${fmt(stats.stun)}s`);
+  if (stats.siphon > 0) bits.push(`+${stats.siphon} coin on a kill`);
+  if (stats.shatter > 0) bits.push(`+${Math.round(stats.shatter * 100)}% vs chilled`);
+  return bits.join(" · ");
+}
+
+function TowerPick({
+  kind,
+  active,
+  inspected,
+  poor,
+  onPick,
+  onHoverStart,
+  onHoverEnd,
+  onLongPress,
+}: {
+  kind: TowerId;
+  active: boolean;
+  inspected: boolean;
+  poor: boolean;
+  onPick: () => void;
+  onHoverStart: () => void;
+  onHoverEnd: () => void;
+  onLongPress: () => void;
+}) {
+  const def = TOWERS[kind];
+  const timer = useRef<number | null>(null);
+  const suppress = useRef(false);
+  const origin = useRef({ x: 0, y: 0 });
+
+  const clearTimer = () => {
+    if (timer.current != null) window.clearTimeout(timer.current);
+    timer.current = null;
+  };
+
+  useEffect(() => clearTimer, []);
+
   return (
-    <p className="mt-2 flex items-baseline justify-between gap-3 text-sm">
-      <span className="text-muted">{label}</span>
-      <span className="num">{value}</span>
-    </p>
+    <button
+      type="button"
+      aria-pressed={active}
+      aria-label={`${def.name}, ${def.cost} coin`}
+      aria-describedby={inspected ? "tower-tip" : undefined}
+      className={`tower-pick flex min-w-[4.25rem] flex-1 flex-col items-center gap-0.5 rounded-lg border px-1 py-1 ${
+        active || inspected ? "border-primary bg-surface-2" : "border-line bg-bg"
+      }`}
+      onPointerEnter={(event) => {
+        if (event.pointerType !== "touch") onHoverStart();
+      }}
+      onPointerLeave={(event) => {
+        if (event.pointerType === "touch") return;
+        const next = event.relatedTarget;
+        if (next instanceof Node && document.getElementById("tower-tip")?.contains(next)) return;
+        onHoverEnd();
+      }}
+      onPointerDown={(event) => {
+        if (event.pointerType === "mouse" && event.button !== 0) return;
+        if (event.pointerType === "mouse") return;
+        suppress.current = false;
+        origin.current = { x: event.clientX, y: event.clientY };
+        clearTimer();
+        timer.current = window.setTimeout(() => {
+          timer.current = null;
+          suppress.current = true;
+          if (typeof navigator !== "undefined" && typeof navigator.vibrate === "function") {
+            navigator.vibrate(12);
+          }
+          onLongPress();
+        }, 480);
+      }}
+      onPointerMove={(event) => {
+        if (timer.current == null) return;
+        const dx = event.clientX - origin.current.x;
+        const dy = event.clientY - origin.current.y;
+        if (dx * dx + dy * dy > 64) clearTimer();
+      }}
+      onPointerUp={clearTimer}
+      onPointerCancel={clearTimer}
+      onContextMenu={(event) => event.preventDefault()}
+      onClick={() => {
+        if (suppress.current) {
+          suppress.current = false;
+          return;
+        }
+        onPick();
+      }}
+    >
+      <span className="relative grid size-9 place-items-center">
+        <span className={`absolute inset-1 rounded-full ${def.swatch}`} />
+        <img
+          src={`/game/${kind}.png`}
+          alt=""
+          draggable={false}
+          className="relative size-9 object-contain"
+          onError={(event) => {
+            event.currentTarget.style.visibility = "hidden";
+          }}
+        />
+      </span>
+      <span className={`line-clamp-2 h-8 w-full text-center text-[11px] leading-tight font-semibold ${poor ? "text-danger" : ""}`}>
+        {def.name}
+      </span>
+      <span className={`num text-[10px] leading-none ${poor ? "text-danger" : "text-primary"}`}>{def.cost}</span>
+    </button>
   );
 }
 
-function Inspector({ hud }: { hud: Hud }) {
+function TowerCard({
+  kind,
+  locked,
+  onHold,
+  onLeave,
+  onDismiss,
+}: {
+  kind: TowerId;
+  locked: boolean;
+  onHold: () => void;
+  onLeave: () => void;
+  onDismiss: () => void;
+}) {
+  const def = TOWERS[kind];
+  const stats = combatStats(kind, 1);
+  const extra = extraLine(stats);
+  return (
+    <div
+      id="tower-tip"
+      role="tooltip"
+      className="border-b border-line px-1 py-2"
+      onPointerEnter={onHold}
+      onPointerLeave={(event) => {
+        const next = event.relatedTarget;
+        if (next instanceof Element && next.closest(".tower-pick")) return;
+        onLeave();
+      }}
+    >
+      <div className="flex items-baseline justify-between gap-3">
+        <p className="min-w-0 truncate font-display text-base leading-tight">{def.name}</p>
+        <p className="num shrink-0 text-sm text-primary">{def.cost} coin</p>
+      </div>
+      <p className="text-xs text-primary">{def.craft}</p>
+      <p className="mt-1 text-sm">
+        Damage {stats.damage}
+        <span className="text-muted"> · </span>
+        Fire {fmt(stats.rate)}/s
+        <span className="text-muted"> · </span>
+        Reach {fmt(stats.range)}
+      </p>
+      <p className="text-xs text-muted">
+        {def.special}
+        {extra ? ` · ${extra}` : ""}
+      </p>
+      <p className="mt-0.5 line-clamp-2 text-xs leading-snug text-muted">{def.blurb}</p>
+      {locked ? (
+        <button type="button" className="mt-1 text-xs text-primary" onClick={onDismiss}>
+          Close
+        </button>
+      ) : null}
+    </div>
+  );
+}
+
+function SelectedBar({ hud }: { hud: Hud }) {
   const sel = hud.selected;
   if (!sel) return null;
+  const damage = sel.nextDamage != null ? `${sel.damage}→${sel.nextDamage}` : String(sel.damage);
+  const rate = sel.nextRate != null ? `${fmt(sel.rate)}→${fmt(sel.nextRate)}` : fmt(sel.rate);
+  const reach = sel.nextRange != null ? `${fmt(sel.range)}→${fmt(sel.nextRange)}` : fmt(sel.range);
   return (
-    <div>
-      <p className="font-display text-lg leading-tight">{sel.name}</p>
-      <p className="text-sm text-primary">
-        {sel.craft} · {sel.rankName}
+    <div className="border-b border-line px-1 py-1.5">
+      <p className="truncate text-sm">
+        <span className="font-semibold">{sel.name}</span>
+        <span className="text-muted"> · {sel.rankName}</span>
       </p>
-      <p className="mt-2 text-sm leading-relaxed text-muted">{sel.blurb}</p>
-      <p className="mt-1 text-sm text-fg">{sel.special}</p>
-      <StatLine
-        label="Damage"
-        value={sel.nextDamage != null ? `${sel.damage} → ${sel.nextDamage}` : String(sel.damage)}
-      />
-      <StatLine
-        label="Fire rate"
-        value={
-          sel.nextRate != null
-            ? `${fmt(sel.rate)} → ${fmt(sel.nextRate)} /s`
-            : `${fmt(sel.rate)} /s`
-        }
-      />
-      <StatLine
-        label="Reach"
-        value={
-          sel.nextRange != null
-            ? `${fmt(sel.range)} → ${fmt(sel.nextRange)}`
-            : `${fmt(sel.range)} squares`
-        }
-      />
-      <div className="mt-3 flex gap-2" role="group" aria-label="Targeting">
-        {(
-          [
-            ["first", "First"],
-            ["nearest", "Nearest"],
-            ["strongest", "Strongest"],
-          ] as const
-        ).map(([mode, label]) => (
-          <button
-            key={mode}
-            type="button"
-            aria-pressed={sel.mode === mode}
-            className={`min-h-11 flex-1 rounded-lg border px-1 text-sm ${
-              sel.mode === mode ? "border-primary bg-surface-2" : "border-line"
-            }`}
-            onClick={() => setMode(ensureGame(), mode as TargetMode)}
-          >
-            {label}
-          </button>
-        ))}
-      </div>
-      <div className="mt-3 flex gap-2">
+      <p className="text-xs text-muted">
+        Dmg {damage} · Rate {rate}/s · Reach {reach}
+      </p>
+      <div className="mt-1 flex gap-1">
+        <div className="grid min-w-0 flex-1 grid-cols-3 gap-1" role="group" aria-label="Targeting">
+          {(
+            [
+              ["first", "First"],
+              ["nearest", "Near"],
+              ["strongest", "Strong"],
+            ] as const
+          ).map(([mode, label]) => (
+            <button
+              key={mode}
+              type="button"
+              aria-label={mode === "nearest" ? "Nearest" : mode === "strongest" ? "Strongest" : "First"}
+              aria-pressed={sel.mode === mode}
+              className={`h-9 rounded-lg border text-xs ${
+                sel.mode === mode ? "border-primary bg-surface-2" : "border-line"
+              }`}
+              onClick={() => setMode(ensureGame(), mode as TargetMode)}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
         {sel.upgrade != null ? (
           <button
             type="button"
-            className="min-h-11 flex-1 rounded-xl bg-primary px-3 font-semibold text-primary-fg"
+            className="h-9 shrink-0 rounded-lg bg-primary px-2.5 text-xs font-semibold text-primary-fg"
             onClick={() => {
               unlockAudio();
               upgradeSelected(ensureGame());
             }}
           >
-            Hone · {sel.upgrade}
+            Hone {sel.upgrade}
           </button>
         ) : (
-          <p className="flex min-h-11 flex-1 items-center text-sm text-muted">
-            Warden rank. Damage and fire rate are mastered.
-          </p>
+          <span className="flex h-9 shrink-0 items-center px-1 text-xs text-muted">Warden</span>
         )}
         <button
           type="button"
-          className="min-h-11 rounded-xl border border-line px-3 text-danger"
+          className="h-9 shrink-0 rounded-lg border border-line px-2.5 text-xs text-danger"
           onClick={() => {
             unlockAudio();
             sellSelected(ensureGame());
