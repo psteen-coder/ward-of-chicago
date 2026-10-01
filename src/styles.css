@@ -97,6 +97,13 @@
   font-variant-numeric: tabular-nums;
 }
 
+.tower-pick {
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
+  touch-action: manipulation;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .banner-pop {
     animation: none;
