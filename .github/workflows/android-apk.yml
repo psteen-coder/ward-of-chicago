@@ -37,7 +37,7 @@ jobs:
           sdkmanager "platforms;android-35" "build-tools;35.0.0"
 
       - name: Install
-        run: npm ci
+        run: npm install --no-audit --no-fund
 
       - name: Bundle the game
         run: npm run build:android
