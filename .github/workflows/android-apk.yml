@@ -1,0 +1,103 @@
+name: Android APK
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: SDK packages
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platforms;android-35" "build-tools;35.0.0"
+
+      - name: Install
+        run: npm ci
+
+      - name: Bundle the game
+        run: npm run build:android
+
+      - name: Capacitor Android project
+        run: |
+          npm install --no-save --no-package-lock @capacitor/core@7 @capacitor/cli@7 @capacitor/android@7
+          npx cap add android
+          npx cap sync android
+          node scripts/android-sign.mjs
+
+      - name: Signing key
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          cd android/app
+          if [ -n "$ANDROID_KEYSTORE_BASE64" ]; then
+            printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 -d > ward-release.keystore
+          else
+            keytool -genkeypair -v \
+              -keystore ward-release.keystore \
+              -alias "${ANDROID_KEY_ALIAS:-ward}" \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -storepass "${ANDROID_KEYSTORE_PASSWORD:-ward-of-chicago}" \
+              -keypass "${ANDROID_KEY_PASSWORD:-ward-of-chicago}" \
+              -dname "CN=Ward of Chicago, O=Fan Game, C=US"
+          fi
+
+      - name: Assemble release APK
+        working-directory: android
+        env:
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleRelease --no-daemon
+
+      - name: Name the APK
+        run: |
+          cp android/app/build/outputs/apk/release/app-release.apk Ward-of-Chicago.apk
+          ls -lh Ward-of-Chicago.apk
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_type == 'tag' && github.ref_name || 'v1.0.0' }}
+          name: Ward of Chicago ${{ github.ref_type == 'tag' && github.ref_name || 'v1.0.0' }} for Android
+          make_latest: true
+          body: |
+            Install **Ward-of-Chicago.apk** on an Android phone.
+
+            1. Download the APK on the phone.
+            2. Open it and allow installs from the browser when Android asks.
+            3. The game is on the home screen. The website version is unchanged.
+
+            Unofficial fan game. Not affiliated with Jim Butcher or the rights holders.
+          files: Ward-of-Chicago.apk
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
