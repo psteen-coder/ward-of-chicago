@@ -1,0 +1,73 @@
+@import "tailwindcss";
+
+@theme {
+  --color-bg: #0c1016;
+  --color-surface: #161c27;
+  --color-surface-2: #222a38;
+  --color-fg: #f3ecdf;
+  --color-muted: #9a9184;
+  --color-primary: #e0b15a;
+  --color-primary-fg: #1a1408;
+  --color-ward: #7eb0c8;
+  --color-danger: #c4514d;
+  --color-line: #2c3546;
+  --font-sans: "Outfit", system-ui, sans-serif;
+  --font-display: "Cinzel", "Palatino Linotype", Palatino, serif;
+}
+
+@layer base {
+  button:not(:disabled),
+  [role="button"]:not(:disabled) {
+    cursor: pointer;
+  }
+  button:focus-visible,
+  [role="button"]:focus-visible {
+    outline: 2px solid var(--color-primary);
+    outline-offset: 2px;
+  }
+  html,
+  body {
+    background: var(--color-bg);
+    color: var(--color-fg);
+    font-family: var(--font-sans);
+  }
+  body {
+    margin: 0;
+  }
+}
+
+@keyframes banner-pop {
+  0% {
+    opacity: 0;
+    transform: translate(-50%, 8px);
+  }
+  14% {
+    opacity: 1;
+    transform: translate(-50%, 0);
+  }
+  72% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+  }
+}
+
+.banner-pop {
+  animation: banner-pop 2.3s ease forwards;
+}
+
+.safe-pad {
+  padding-bottom: max(0.75rem, env(safe-area-inset-bottom));
+}
+
+.num {
+  font-variant-numeric: tabular-nums;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .banner-pop {
+    animation: none;
+    opacity: 1;
+  }
+}
