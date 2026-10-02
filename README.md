@@ -1,6 +1,6 @@
 # Ward of Chicago
 
-Fan tower-defense game. The front door asks for single player or a local battle before the night, the court, and the ground. Single player is Standard Night, Endless Night, or Speed Run. Multiplayer stays on this device: your court holds one street, a rival court holds the other, coin ticks in, and you spend it to build or to push creeps onto their road. The first door to break loses. On a phone the board sits above a scrolling roster; a wide landscape window keeps the side panel. Add it to your home screen from Settings to open it full screen.
+Fan tower-defense game. The front door asks for single player or multiplayer before the night, the court, and the ground. Single player is Standard Night, Endless Night, or Speed Run. Multiplayer is either a local battle on this device, or a table with a friend: share a four-character code, each of you holds a street, and the first door to break loses. Friend tables use this website for the handshake, then the streets talk directly. The Android file joins the same table once it has this website's address. On a phone, lives, coin, and the night sit on top; tower names sit along the bottom. Hold a name for range and damage. Add it to your home screen from Settings to open it full screen.
 
 Not affiliated with Jim Butcher or the rights holders. Original art. No official logos.
 
@@ -27,6 +27,8 @@ Tap a name, then a sidewalk. Upgrade twice (Honed, then Warden) to raise damage 
 
 The website is the game. The Android package is the same game, installed from a file.
 
-GitHub Actions builds `Ward-of-Chicago.apk` and attaches it to a release. Download that file on the phone, open it, and allow the install when Android asks. There is no store listing.
+The Android file is [Ward-of-Chicago.apk](https://github.com/psteen-coder/ward-of-chicago/releases/download/v1.0.0/Ward-of-Chicago.apk) on the v1.0.0 release. Download it on the phone, open it, and allow the install. There is no store listing. If an older install will not update, remove it first. Each new file is signed on its own.
 
-Keys: `1`–`5` pick a tower, `U` hones, `Space` sends the night or pauses.
+Friend tables use the website for the handshake, then the streets talk directly. On the installed file, paste the website address once. Both people use that same address and the same code.
+
+Keys: `1`–`5` pick a tower, `U` hones, `Space` sends the night or pauses. Space does not pause a friend table.

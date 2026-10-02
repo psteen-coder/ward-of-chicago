@@ -19,9 +19,13 @@ import {
 } from "@/game/balance";
 import {
   PUSHES,
+  acceptAgain,
+  applyFriendStart,
+  askAgain,
   fastDuel,
   getDuel,
   holdWatch,
+  leaveFriend,
   parkDuel,
   pushCreep,
   rematch,
@@ -34,6 +38,16 @@ import {
   type DuelHud,
   type PushId,
 } from "@/game/battle";
+import { netSend } from "@/game/online";
+import {
+  EMPTY_SEAT,
+  FriendPanel,
+  FriendWire,
+  cleanTableCode,
+  makeTableCode,
+  type FriendLink,
+  type FriendSeat,
+} from "@/components/FriendTable";
 import { draw, emptyArt, type ArtBook } from "@/game/draw";
 import {
   WORLD_H,
@@ -177,14 +191,26 @@ function loadArt(art: ArtBook) {
   }
 }
 
+type DoorPanel = "main" | "case" | "battle" | "settings" | "multi" | "friend";
+
+function tableFromUrl() {
+  if (typeof window === "undefined") return "";
+  return cleanTableCode(new URLSearchParams(window.location.search).get("table") ?? "");
+}
+
 export function WardGame() {
   const hud = useSyncExternalStore(subscribe, getHud, getServerHud);
   const [muted, setMutedUi] = useState(false);
-  const [panel, setPanel] = useState<"main" | "case" | "battle" | "settings">("main");
+  const [panel, setPanel] = useState<DoorPanel>(() => (tableFromUrl().length === 4 ? "friend" : "main"));
   const [draftTeam, setDraftTeam] = useState<TeamId>("dresden");
   const [draftMap, setDraftMap] = useState<MapId>("chicago");
   const [draftMode, setDraftMode] = useState<ModeId>("standard");
   const [draftRival, setDraftRival] = useState<TeamId>("winter");
+  const [link, setLink] = useState<FriendLink | null>(null);
+  const [seat, setSeat] = useState<FriendSeat>(EMPTY_SEAT);
+  const [friendName, setFriendName] = useState("Warden");
+  const [friendCode, setFriendCode] = useState(() => tableFromUrl());
+  const [friendReady, setFriendReady] = useState(false);
   const [volume, setVolumeUi] = useState(85);
   const phone = usePhoneInstall();
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -270,7 +296,7 @@ export function WardGame() {
       if (event.code === "Space" && tag !== "BUTTON") {
         event.preventDefault();
         if (g.phase === "prep") sendWave(g);
-        else if (g.phase === "combat") togglePause(g);
+        else if (g.phase === "combat" && !getDuel()?.online) togglePause(g);
       }
     };
     window.addEventListener("keydown", onKey);
@@ -308,6 +334,47 @@ export function WardGame() {
   const duel = getDuel();
   const canSend = !duel && hud.phase === "prep" && (hud.mode === "endless" || hud.sent < hud.total);
   const playing = hud.phase === "prep" || hud.phase === "combat";
+
+  const dropLink = () => {
+    setLink(null);
+    setFriendReady(false);
+    setSeat(EMPTY_SEAT);
+    leaveFriend(ensureGame());
+  };
+
+  const hostTable = () => {
+    unlockAudio();
+    const code = makeTableCode();
+    const name = friendName.trim().slice(0, 24) || "Warden";
+    setFriendReady(false);
+    setSeat(EMPTY_SEAT);
+    setLink({ role: "host", code, name });
+  };
+
+  const joinTable = () => {
+    const code = cleanTableCode(friendCode);
+    if (code.length !== 4) return;
+    unlockAudio();
+    const name = friendName.trim().slice(0, 24) || "Warden";
+    setFriendReady(false);
+    setSeat(EMPTY_SEAT);
+    setLink({ role: "guest", code, name });
+  };
+
+  const beginTable = () => {
+    if (!link || link.role !== "host" || !seat.peerTeam) return;
+    unlockAudio();
+    const msg = {
+      t: "start" as const,
+      map: draftMap,
+      hostTeam: draftTeam,
+      guestTeam: seat.peerTeam,
+      round: 1,
+    };
+    applyFriendStart(ensureGame(), msg, "host");
+    netSend(msg);
+    setPanel("main");
+  };
 
   const dismissTip = () => {
     if (hideTipTimer.current != null) window.clearTimeout(hideTipTimer.current);
@@ -561,6 +628,7 @@ export function WardGame() {
               className="grid size-10 shrink-0 place-items-center rounded-xl border border-line"
               aria-label={hud.speed === 1 ? "Double speed" : "Normal speed"}
               aria-pressed={hud.speed === 2}
+              hidden={!!duel?.online}
               onClick={() => {
                 unlockAudio();
                 toggleSpeed(ensureGame());
@@ -568,7 +636,7 @@ export function WardGame() {
             >
               <span className="num text-sm">{hud.speed}×</span>
             </button>
-            {hud.phase === "combat" ? (
+            {hud.phase === "combat" && !duel?.online ? (
               <button
                 type="button"
                 className="grid size-10 shrink-0 place-items-center rounded-xl border border-line"
@@ -642,11 +710,19 @@ export function WardGame() {
               className="mt-6 min-h-12 w-full rounded-xl bg-primary font-semibold text-primary-fg"
               onClick={() => {
                 unlockAudio();
-                if (duel) rematch(ensureGame());
+                if (duel?.online) {
+                  if (duel.role === "host") {
+                    const start = acceptAgain(ensureGame());
+                    if (start) netSend(start);
+                  } else {
+                    netSend({ t: "again" });
+                    askAgain(ensureGame());
+                  }
+                } else if (duel) rematch(ensureGame());
                 else restart(ensureGame());
               }}
             >
-              Walk it again
+              {duel?.online && duel.role === "guest" ? "Ask to walk it again" : "Walk it again"}
             </button>
             <button
               id="main-menu"
@@ -694,6 +770,28 @@ export function WardGame() {
             setVolumeUi(Math.round(getVolume() * 100));
           }}
           phone={phone}
+          link={link}
+          seat={seat}
+          friendName={friendName}
+          friendCode={friendCode}
+          friendReady={friendReady}
+          onFriendName={setFriendName}
+          onFriendCode={setFriendCode}
+          onFriendReady={setFriendReady}
+          onHost={hostTable}
+          onJoin={joinTable}
+          onBegin={beginTable}
+          onDropLink={dropLink}
+        />
+      ) : null}
+      {link ? (
+        <FriendWire
+          key={`${link.role}:${link.code}:${link.name}`}
+          link={link}
+          team={draftTeam}
+          map={draftMap}
+          ready={friendReady}
+          onSeat={setSeat}
         />
       ) : null}
     </div>
@@ -717,16 +815,28 @@ function FrontDoor({
   onVolume,
   onMute,
   phone,
+  link,
+  seat,
+  friendName,
+  friendCode,
+  friendReady,
+  onFriendName,
+  onFriendCode,
+  onFriendReady,
+  onHost,
+  onJoin,
+  onBegin,
+  onDropLink,
 }: {
   hud: Hud;
-  panel: "main" | "case" | "battle" | "settings";
+  panel: DoorPanel;
   volume: number;
   muted: boolean;
   draftTeam: TeamId;
   draftMap: MapId;
   draftMode: ModeId;
   draftRival: TeamId;
-  onPanel: (panel: "main" | "case" | "battle" | "settings") => void;
+  onPanel: (panel: DoorPanel) => void;
   onTeam: (id: TeamId) => void;
   onMap: (id: MapId) => void;
   onMode: (id: ModeId) => void;
@@ -734,6 +844,18 @@ function FrontDoor({
   onVolume: (value: number) => void;
   onMute: () => void;
   phone: ReturnType<typeof usePhoneInstall>;
+  link: FriendLink | null;
+  seat: FriendSeat;
+  friendName: string;
+  friendCode: string;
+  friendReady: boolean;
+  onFriendName: (value: string) => void;
+  onFriendCode: (value: string) => void;
+  onFriendReady: (value: boolean) => void;
+  onHost: () => void;
+  onJoin: () => void;
+  onBegin: () => void;
+  onDropLink: () => void;
 }) {
   const offerInstall = !phone.standalone && !phone.installed && (phone.android || phone.canPrompt);
   const duel = getDuel();
@@ -761,6 +883,7 @@ function FrontDoor({
             onBack={() => onPanel("main")}
             onStart={() => {
               unlockAudio();
+              onDropLink();
               onPanel("main");
               newGame(ensureGame(), draftMap, draftTeam, draftMode);
             }}
@@ -773,12 +896,67 @@ function FrontDoor({
             onTeam={onTeam}
             onRival={onRival}
             onMap={onMap}
-            onBack={() => onPanel("main")}
+            onBack={() => onPanel("multi")}
             onStart={() => {
               unlockAudio();
+              onDropLink();
               onPanel("main");
               startDuel(ensureGame(), draftMap, draftTeam, draftRival);
             }}
+          />
+        ) : panel === "multi" ? (
+          <div>
+            <button id="multi-back" type="button" className="min-h-11 rounded-lg px-1 text-sm text-muted" onClick={() => onPanel("main")}>
+              Back
+            </button>
+            <h2 className="mt-3 font-display text-4xl leading-tight text-fg">Multiplayer</h2>
+            <p className="mt-2 max-w-xl text-sm leading-relaxed text-muted">
+              Sit a friend at another screen, or fight a rival court on this one. Either way, the first broken door loses.
+            </p>
+            <div className="mt-6 flex flex-col gap-3">
+              <button
+                id="play-friend"
+                type="button"
+                className="min-h-14 w-full rounded-xl bg-primary px-4 py-3 text-left font-semibold text-primary-fg"
+                onClick={() => onPanel("friend")}
+              >
+                <span className="block text-lg">With a friend</span>
+                <span className="mt-0.5 block text-sm font-normal opacity-80">
+                  Share a short code. Each of you holds a street.
+                </span>
+              </button>
+              <button
+                id="play-local"
+                type="button"
+                className="min-h-14 w-full rounded-xl border border-line bg-surface px-4 py-3 text-left font-semibold text-fg"
+                onClick={() => onPanel("battle")}
+              >
+                <span className="block text-lg">On this device</span>
+                <span className="mt-0.5 block text-sm font-normal text-muted">
+                  A rival court plays the other street here.
+                </span>
+              </button>
+            </div>
+          </div>
+        ) : panel === "friend" ? (
+          <FriendPanel
+            link={link}
+            seat={seat}
+            name={friendName}
+            code={friendCode}
+            ready={friendReady}
+            team={draftTeam}
+            map={draftMap}
+            onName={onFriendName}
+            onCode={onFriendCode}
+            onTeam={onTeam}
+            onMap={onMap}
+            onReady={onFriendReady}
+            onHost={onHost}
+            onJoin={onJoin}
+            onBegin={onBegin}
+            onLeave={onDropLink}
+            onBack={() => onPanel("multi")}
           />
         ) : (
           <div className="grid items-center gap-10 lg:grid-cols-2">
@@ -786,8 +964,7 @@ function FrontDoor({
               <p className="text-xs tracking-widest text-primary">AN UNOFFICIAL NIGHT</p>
               <h2 className="mt-3 font-display text-4xl leading-tight text-fg sm:text-6xl">Ward of Chicago</h2>
               <p className="mt-4 max-w-md text-base leading-relaxed text-muted">
-                Single player is a night on your own. Multiplayer is a local battle:
-                your court holds one street, a rival court holds the other.
+                Single player is a night on your own. Multiplayer is a friend at another screen, or a rival court on this one.
               </p>
               <p className="mt-8 max-w-md text-xs leading-relaxed text-muted">
                 A fan game. Not affiliated with Jim Butcher or the rights holders.
@@ -805,6 +982,7 @@ function FrontDoor({
                   }`}
                   onClick={() => {
                     unlockAudio();
+                    onDropLink();
                     onPanel("main");
                     continueGame(ensureGame());
                   }}
@@ -827,13 +1005,18 @@ function FrontDoor({
                   className="min-h-14 w-full rounded-xl bg-primary px-4 py-3 text-left font-semibold text-primary-fg"
                   onClick={() => {
                     unlockAudio();
+                    if (!duel.online) onDropLink();
                     onPanel("main");
                     resumeDuel(ensureGame());
                   }}
                 >
                   <span className="block text-lg">Continue battle</span>
                   <span className="mt-0.5 block text-sm font-normal opacity-80">
-                    {duel.youTeam} vs {duel.rivalTeam} · {duel.mapPlace}
+                    {duel.online && duel.quiet
+                      ? "The other street went quiet."
+                      : duel.online
+                        ? "The night is still running."
+                        : `${duel.youTeam} vs ${duel.rivalTeam} · ${duel.mapPlace}`}
                   </span>
                 </button>
               ) : null}
@@ -856,11 +1039,11 @@ function FrontDoor({
                 id="play-multi"
                 type="button"
                 className="min-h-14 w-full rounded-xl border border-line bg-surface px-4 py-3 text-left font-semibold text-fg"
-                onClick={() => onPanel("battle")}
+                onClick={() => onPanel("multi")}
               >
                 <span className="block text-lg">Multiplayer</span>
                 <span className="mt-0.5 block text-sm font-normal text-muted">
-                  A local battle on this device. Your court against a rival court.
+                  A friend on another screen, or a rival court on this one.
                 </span>
               </button>
               <button
@@ -1175,7 +1358,17 @@ function SettingsPanel({
         <div className="mt-10 border-t border-line pt-8">
           <h3 className="font-display text-2xl text-fg">On a phone</h3>
           <p className="mt-2 text-sm leading-relaxed text-muted">
-            The computer layout stays in a wide window. On a phone, add the game to your home screen and it opens full screen. There is no store download.
+            The computer layout stays in a wide window. On a phone, add the game to your home screen, or install the Android file.
+          </p>
+          <a
+            id="download-apk"
+            href="https://github.com/psteen-coder/ward-of-chicago/releases/download/v1.0.0/Ward-of-Chicago.apk"
+            className="mt-4 flex min-h-12 w-full items-center justify-center rounded-xl border border-line bg-surface font-semibold text-fg"
+          >
+            Download the Android file
+          </a>
+          <p className="mt-2 text-sm leading-relaxed text-muted">
+            Open the file on the phone and allow the install. If an older Ward of Chicago is already there and will not update, remove it first. The file can join a friend table once it has this website's address.
           </p>
           {phone.installed ? (
             <p className="mt-4 text-sm text-primary">Added. Open Ward of Chicago from your home screen.</p>

@@ -113,7 +113,8 @@ jobs:
 
             1. Download the APK on the phone.
             2. Open it and allow installs from the browser when Android asks.
-            3. The game is on the home screen. The website version is unchanged.
+            3. If an older Ward of Chicago is already installed and will not update, remove it first. Each file is signed on its own.
+            4. Friend tables: open the game's website with a friend, or paste that website address once in the Android file. Share the four-character code. The first door to break loses.
 
             Unofficial fan game. Not affiliated with Jim Butcher or the rights holders.
           files: Ward-of-Chicago.apk
