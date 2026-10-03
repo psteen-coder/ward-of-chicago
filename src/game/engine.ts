@@ -39,6 +39,15 @@ import {
   type TeamId,
   type TowerId,
 } from "./balance";
+import { noteDeed, openRoster, trainedStats } from "./ledger";
+import {
+  CHAPTERS,
+  canPlayChapter,
+  claimChapter,
+  hintBesidePath,
+  storyBlurb,
+  type CoachStep,
+} from "./story";
 
 export type Phase = "menu" | "prep" | "combat" | "victory" | "defeat";
 
@@ -167,6 +176,20 @@ export type Game = {
   spawnQueue: SpawnJob[];
   spawnAcc: number;
   events: string[];
+  /** Story chapter index. Null on a free night or a duel. */
+  story: number | null;
+  coachAt: number;
+  offerOpen: boolean;
+  freeHone: boolean;
+  stoopWard: boolean;
+  /** Player streets use trained crafts. The rival's street does not. */
+  applyTrain: boolean;
+  /** When set, only these towers may be posted. */
+  roster: TowerId[] | null;
+  /** Free play and story lock the bar to what the case has sworn. */
+  limitRoster: boolean;
+  hint: { c: number; r: number } | null;
+  epilogue: string;
 };
 
 export type Selection = {
@@ -230,6 +253,17 @@ export type Hud = {
   saveTeam: string;
   saveMode: string;
   selected: Selection | null;
+  story: number | null;
+  storyTitle: string;
+  coach: string;
+  /** place, hone, and aim block the send button. */
+  coachBlocks: boolean;
+  offerOpen: boolean;
+  offerLesson: boolean;
+  freeHone: boolean;
+  stoopWard: boolean;
+  epilogue: string;
+  roster: TowerId[];
 };
 
 export type PlaceResult = "ok" | "street" | "held" | "bounds" | "gold" | "closed";
@@ -275,6 +309,12 @@ type SaveFile = {
   roundTimes?: number[];
   combatTime?: number;
   roundMark?: number;
+  story?: number | null;
+  coachAt?: number;
+  offerOpen?: boolean;
+  freeHone?: boolean;
+  stoopWard?: boolean;
+  roster?: TowerId[] | null;
 };
 
 export function createGame(): Game {
@@ -319,15 +359,64 @@ export function createGame(): Game {
     spawnQueue: [],
     spawnAcc: 0,
     events: [],
+    story: null,
+    coachAt: 0,
+    offerOpen: false,
+    freeHone: false,
+    stoopWard: false,
+    applyTrain: true,
+    roster: null,
+    limitRoster: true,
+    hint: null,
+    epilogue: "",
   };
+}
+
+function statsFor(g: Game, kind: TowerId, rank: number) {
+  return g.applyTrain ? trainedStats(kind, rank) : combatStats(kind, rank);
+}
+
+export function playerRoster(g: Game): TowerId[] {
+  if (!g.limitRoster) return (TEAMS[g.team] ?? TEAMS.dresden).units;
+  if (g.roster && g.roster.length) return g.roster;
+  return openRoster(g.team);
+}
+
+function coachStep(g: Game): CoachStep | null {
+  if (g.story == null) return null;
+  const steps = CHAPTERS[g.story]?.coach ?? [];
+  return steps[g.coachAt] ?? null;
+}
+
+function syncHint(g: Game) {
+  const step = coachStep(g);
+  g.hint = step?.kind === "place" ? hintBesidePath(g.map) : null;
+}
+
+function advanceCoach(g: Game) {
+  if (!coachStep(g)) return;
+  g.coachAt += 1;
+  const next = coachStep(g);
+  if (next?.kind === "place" && next.tower) g.placing = next.tower;
+  syncHint(g);
+}
+
+function nightCap(g: Game) {
+  if (g.story != null) return CHAPTERS[g.story]?.waves.length ?? 1;
+  return NIGHT_COUNT;
+}
+
+function nightWave(g: Game) {
+  if (g.story != null) return CHAPTERS[g.story]?.waves[g.sent] ?? [];
+  return waveAt(g.sent);
 }
 
 function selectionOf(g: Game): Selection | null {
   const tower = g.towers.find((t) => t.id === g.selected);
   if (!tower) return null;
   const def = TOWERS[tower.kind];
-  const now = combatStats(tower.kind, tower.rank);
-  const next = tower.rank < 3 ? combatStats(tower.kind, tower.rank + 1) : null;
+  const now = statsFor(g, tower.kind, tower.rank);
+  const next = tower.rank < 3 ? statsFor(g, tower.kind, tower.rank + 1) : null;
   return {
     id: tower.id,
     kind: tower.kind,
@@ -343,7 +432,7 @@ function selectionOf(g: Game): Selection | null {
     nextDamage: next ? next.damage : null,
     nextRate: next ? next.rate : null,
     nextRange: next && next.range !== now.range ? next.range : null,
-    upgrade: upgradeCost(tower.kind, tower.rank),
+    upgrade: g.freeHone && upgradeCost(tower.kind, tower.rank) != null ? 0 : upgradeCost(tower.kind, tower.rank),
     sell: Math.floor(tower.spent * SELL_REFUND),
     mode: tower.mode,
   };
@@ -359,6 +448,9 @@ export function buildHud(g: Game): Hud {
   const roundTimes = Array.isArray(g.roundTimes) ? g.roundTimes : [];
   const combatTime = Number.isFinite(g.combatTime) ? g.combatTime : 0;
   const roundMark = Number.isFinite(g.roundMark) ? g.roundMark : 0;
+  const story = g.story != null ? CHAPTERS[g.story] : null;
+  const cap = story ? story.waves.length : NIGHT_COUNT;
+  const step = coachStep(g);
   const nightOpen = g.phase === "combat" || (g.phase === "defeat" && roundTimes.length < g.sent);
   return {
     phase: g.phase,
@@ -368,9 +460,9 @@ export function buildHud(g: Game): Hud {
     slain: g.slain,
     cleared: g.cleared,
     sent: g.sent,
-    total: mode === "endless" ? 0 : NIGHT_COUNT,
+    total: mode === "endless" && !story ? 0 : cap,
     remaining: alive + queued,
-    nextBlurb: nextIndex >= 0 ? describeWave(nextIndex) : "",
+    nextBlurb: nextIndex >= 0 ? (story ? storyBlurb(g.story ?? 0, nextIndex) : describeWave(nextIndex)) : "",
     placing: g.placing,
     paused: g.paused,
     speed: g.speed,
@@ -399,6 +491,16 @@ export function buildHud(g: Game): Hud {
     saveTeam: saveBrief?.teamName ?? "",
     saveMode: saveBrief?.modeName ?? "",
     selected: selectionOf(g),
+    story: g.story,
+    storyTitle: story?.title ?? "",
+    coach: step?.text ?? "",
+    coachBlocks: step != null && step.kind !== "send",
+    offerOpen: g.offerOpen,
+    offerLesson: story?.teachOffer === true && g.offerOpen,
+    freeHone: g.freeHone,
+    stoopWard: g.stoopWard,
+    epilogue: g.epilogue,
+    roster: playerRoster(g),
   };
 }
 
@@ -535,6 +637,30 @@ function remember(g: Game) {
   g.best = Math.max(reached, g.bests[g.map] ?? 0);
 }
 
+function wantsOffer(g: Game) {
+  if (g.duel) return false;
+  if (g.story != null) return CHAPTERS[g.story]?.teachOffer === true && g.sent < nightCap(g);
+  if (modeOf(g) === "speed") return false;
+  return true;
+}
+
+export function takeOffer(g: Game, kind: "coin" | "hone" | "ward") {
+  if (!g.offerOpen || g.phase !== "prep") return;
+  g.offerOpen = false;
+  if (kind === "coin") {
+    g.gold += 40;
+    say(g, "Forty coin, left on the stoop.");
+  } else if (kind === "hone") {
+    g.freeHone = true;
+    say(g, "The next hone costs nothing.");
+  } else {
+    g.stoopWard = true;
+    say(g, "A ward sits on the door for one hit.");
+  }
+  noteDeed("offer");
+  emit(g);
+}
+
 function endGame(g: Game, phase: "victory" | "defeat") {
   g.phase = phase;
   g.paused = false;
@@ -544,6 +670,14 @@ function endGame(g: Game, phase: "victory" | "defeat") {
     g.dirty = true;
     return;
   }
+  if (g.story != null) {
+    g.epilogue = phase === "victory" ? claimChapter(g.story) : "The chapter broke. The swearing waits.";
+    clearSave();
+    g.events.push(phase);
+    g.dirty = true;
+    return;
+  }
+  if (phase === "victory" && modeOf(g) === "standard") noteDeed("dawn");
   remember(g);
   clearSave();
   g.events.push(phase);
@@ -571,6 +705,7 @@ function readSave(): SaveFile | null {
     if (!Array.isArray(data.towers) || !Array.isArray(data.enemies)) return null;
     const team = isTeamId(data.team) ? data.team : "dresden";
     const mode = isModeId(data.mode) ? data.mode : "standard";
+    const storyTitle = typeof data.story === "number" ? CHAPTERS[data.story]?.title : "";
     saveBrief = {
       map: data.map,
       name: MAPS[data.map].name,
@@ -579,7 +714,7 @@ function readSave(): SaveFile | null {
       team,
       teamName: TEAMS[team].name,
       mode,
-      modeName: MODES[mode].name,
+      modeName: storyTitle || MODES[mode].name,
     };
     return data;
   } catch {
@@ -610,6 +745,12 @@ function writeSave(g: Game) {
     roundTimes: Array.isArray(g.roundTimes) ? g.roundTimes.slice() : [],
     combatTime: g.combatTime || 0,
     roundMark: g.roundMark || 0,
+    story: g.story,
+    coachAt: g.coachAt,
+    offerOpen: g.offerOpen,
+    freeHone: g.freeHone,
+    stoopWard: g.stoopWard,
+    roster: g.roster ? g.roster.slice() : null,
     towers: g.towers.map((t) => ({ ...t, recoil: 0 })),
     enemies: g.enemies.filter((e) => e.alive).map((e) => ({ ...e })),
     spawnQueue: g.spawnQueue.map((job) => ({ ...job })),
@@ -621,6 +762,7 @@ function writeSave(g: Game) {
     /* ignore quota */
   }
   const mode = modeOf(g);
+  const storyTitle = g.story != null ? CHAPTERS[g.story]?.title : "";
   saveBrief = {
     map: g.map,
     name: MAPS[g.map].name,
@@ -629,7 +771,7 @@ function writeSave(g: Game) {
     team: g.team,
     teamName: TEAMS[g.team].name,
     mode,
-    modeName: MODES[mode].name,
+    modeName: storyTitle || MODES[mode].name,
   };
   lastPersist = g.time;
 }
@@ -705,6 +847,19 @@ function applySave(g: Game, data: SaveFile) {
       dotHue: typeof e.dotHue === "string" ? e.dotHue : "",
     }));
   fresh.spawnQueue = data.spawnQueue.filter((job) => job && job.kind in CREEPS && job.left > 0);
+  const storyIndex = typeof data.story === "number" && CHAPTERS[data.story] ? data.story : null;
+  fresh.story = storyIndex;
+  fresh.coachAt = Math.max(0, Math.floor(Number(data.coachAt) || 0));
+  fresh.offerOpen = Boolean(data.offerOpen);
+  fresh.freeHone = Boolean(data.freeHone);
+  fresh.stoopWard = Boolean(data.stoopWard);
+  fresh.applyTrain = true;
+  fresh.limitRoster = true;
+  fresh.roster = storyIndex != null ? CHAPTERS[storyIndex].roster.slice() : null;
+  syncHint(fresh);
+  if (coachStep(fresh)?.kind === "place" && coachStep(fresh)?.tower) {
+    fresh.placing = coachStep(fresh)?.tower ?? null;
+  }
   Object.assign(g, fresh);
 }
 
@@ -748,6 +903,8 @@ export function loadBest(g: Game) {
     g.bests = bests;
     g.marks = readMarks();
     g.best = scoreBest(modeOf(g), bests, g.marks, g.map);
+    g.limitRoster = true;
+    g.applyTrain = true;
     readSave();
     emit(g);
   } catch {
@@ -775,9 +932,39 @@ export function newGame(
   fresh.mode = mode;
   fresh.best = scoreBest(mode, bests, marks, id);
   fresh.phase = "prep";
+  fresh.applyTrain = true;
+  fresh.limitRoster = true;
   Object.assign(g, fresh);
   say(g, `${MODES[mode].name} · ${TEAMS[team].name} · ${MAPS[id].place}`);
   emit(g);
+}
+
+export function startStory(g: Game, index: number) {
+  if (!canPlayChapter(index)) return false;
+  const chapter = CHAPTERS[index];
+  leaveBattle();
+  const bests = g.bests ?? emptyBests();
+  const marks = g.marks ?? emptyMarks();
+  const fresh = createGame();
+  fresh.bests = bests;
+  fresh.marks = marks;
+  fresh.map = chapter.map;
+  fresh.team = chapter.team;
+  fresh.mode = "standard";
+  fresh.best = scoreBest("standard", bests, marks, chapter.map);
+  fresh.phase = "prep";
+  fresh.story = index;
+  fresh.roster = chapter.roster.slice();
+  fresh.limitRoster = true;
+  fresh.applyTrain = true;
+  fresh.coachAt = 0;
+  const first = chapter.coach[0];
+  if (first?.kind === "place" && first.tower) fresh.placing = first.tower;
+  syncHint(fresh);
+  Object.assign(g, fresh);
+  say(g, chapter.title);
+  emit(g);
+  return true;
 }
 
 export function startCase(g: Game, mapId?: MapId, teamId?: TeamId) {
@@ -806,11 +993,16 @@ export function toMenu(g: Game) {
 }
 
 export function restart(g: Game) {
+  if (g.story != null) {
+    startStory(g, g.story);
+    return;
+  }
   newGame(g, g.map, g.team, modeOf(g));
 }
 
 export function selectKind(g: Game, kind: TowerId) {
   if (g.phase === "menu" || g.phase === "victory" || g.phase === "defeat") return;
+  if (g.limitRoster && !playerRoster(g).includes(kind)) return;
   g.placing = g.placing === kind ? null : kind;
   g.selected = null;
   emit(g);
@@ -833,6 +1025,9 @@ export function setMode(g: Game, mode: TargetMode) {
   const tower = g.towers.find((t) => t.id === g.selected);
   if (!tower) return;
   tower.mode = mode;
+  if (mode !== "first") noteDeed("aim");
+  const step = coachStep(g);
+  if (step?.kind === "aim" && mode !== "first") advanceCoach(g);
   emit(g);
 }
 
@@ -857,9 +1052,10 @@ export function placementStatus(g: Game, c: number, r: number, kind: TowerId): P
 }
 
 function placeTower(g: Game, kind: TowerId, c: number, r: number) {
+  if (g.limitRoster && !playerRoster(g).includes(kind)) return;
   const def = TOWERS[kind];
   g.gold -= def.cost;
-  g.towers.push({
+  const tower = {
     id: g.nextId++,
     kind,
     c,
@@ -867,12 +1063,19 @@ function placeTower(g: Game, kind: TowerId, c: number, r: number) {
     rank: 1,
     spent: def.cost,
     cooldown: 0,
-    mode: "first",
+    mode: "first" as const,
     angle: 0,
     recoil: 0,
-  });
+  };
+  g.towers.push(tower);
   say(g, `${def.name} takes the corner.`);
   g.events.push("place");
+  const step = coachStep(g);
+  if (step?.kind === "place" && (!step.tower || step.tower === kind)) {
+    g.selected = tower.id;
+    g.placing = null;
+    advanceCoach(g);
+  }
   emit(g);
 }
 
@@ -923,12 +1126,13 @@ export function upgradeSelected(g: Game) {
   }
   const tower = g.towers.find((t) => t.id === g.selected);
   if (!tower) return;
-  const cost = upgradeCost(tower.kind, tower.rank);
-  if (cost == null) {
+  const listed = upgradeCost(tower.kind, tower.rank);
+  if (listed == null) {
     say(g, "That craft is already mastered.");
     emit(g);
     return;
   }
+  const cost = g.freeHone ? 0 : listed;
   if (g.gold < cost) {
     say(g, "Not enough coin to hone them.");
     g.events.push("deny");
@@ -936,10 +1140,13 @@ export function upgradeSelected(g: Game) {
     return;
   }
   g.gold -= cost;
-  tower.spent += cost;
+  if (g.freeHone) g.freeHone = false;
+  else tower.spent += cost;
   tower.rank += 1;
   say(g, `${TOWERS[tower.kind].name} is ${RANK_NAMES[tower.rank]}.`);
   g.events.push("upgrade");
+  noteDeed("hone");
+  if (coachStep(g)?.kind === "hone") advanceCoach(g);
   emit(g);
 }
 
@@ -957,13 +1164,15 @@ export function sellSelected(g: Game) {
   g.selected = null;
   say(g, `Released. ${refund} coin returned.`);
   g.events.push("sell");
+  noteDeed("sell");
   emit(g);
 }
 
 function beginWave(g: Game) {
   const mode = modeOf(g);
-  if (mode !== "endless" && g.sent >= NIGHT_COUNT) return false;
-  const wave = waveAt(g.sent);
+  const cap = nightCap(g);
+  if (mode !== "endless" && g.sent >= cap) return false;
+  const wave = nightWave(g);
   if (waveCreepCount(wave) <= 0) return false;
   g.spawnQueue = wave.map((group) => ({
     kind: group.kind,
@@ -975,18 +1184,34 @@ function beginWave(g: Game) {
   g.phase = "combat";
   g.paused = false;
   g.roundMark = g.combatTime || 0;
+  g.offerOpen = false;
   return true;
 }
 
 export function sendWave(g: Game) {
   if (g.phase !== "prep") return;
-  if (modeOf(g) !== "endless" && g.sent >= NIGHT_COUNT) return;
+  if (g.offerOpen) {
+    say(g, "Take the street's gift first.");
+    g.events.push("deny");
+    emit(g);
+    return;
+  }
+  const step = coachStep(g);
+  if (step && step.kind !== "send") {
+    say(g, step.text);
+    g.events.push("deny");
+    emit(g);
+    return;
+  }
+  const cap = nightCap(g);
+  if (modeOf(g) !== "endless" && g.sent >= cap) return;
   if (g.towers.length === 0) {
     say(g, "Post a defender before you open the street.");
     g.events.push("deny");
     emit(g);
     return;
   }
+  if (step?.kind === "send") advanceCoach(g);
   if (!beginWave(g)) return;
   say(g, `Night ${g.sent} hits the street.`);
   g.events.push("wave");
@@ -1080,6 +1305,14 @@ function hurt(
 function leak(g: Game, enemy: Enemy) {
   enemy.alive = false;
   if (g.phase !== "combat") return;
+  if (g.stoopWard) {
+    g.stoopWard = false;
+    g.events.push("leak");
+    g.shake = 0.45;
+    say(g, "The ward takes the hit.");
+    noteDeed("ward");
+    return;
+  }
   const cost = CREEPS[enemy.kind].leak;
   g.lives -= cost;
   g.livesLost = (g.livesLost || 0) + cost;
@@ -1336,7 +1569,7 @@ function simulate(g: Game, dt: number) {
   for (const tower of g.towers) {
     if (tower.cooldown > 0) tower.cooldown -= dt;
     if (tower.recoil > 0) tower.recoil -= dt;
-    const stats = combatStats(tower.kind, tower.rank);
+    const stats = statsFor(g, tower.kind, tower.rank);
     const target = pickTarget(g, tower, stats.range * CELL);
     if (target) {
       const origin = cellCenter(tower.c, tower.r);
@@ -1395,10 +1628,11 @@ function simulate(g: Game, dt: number) {
     g.roundTimes.push(elapsed);
     g.cleared = g.sent;
     const mode = modeOf(g);
-    const finished = mode !== "endless" && g.sent >= NIGHT_COUNT;
+    const cap = nightCap(g);
+    const finished = mode !== "endless" && g.sent >= cap;
     if (finished) {
       endGame(g, "victory");
-    } else if (mode === "speed") {
+    } else if (mode === "speed" && g.story == null) {
       if (!beginWave(g)) {
         endGame(g, "victory");
       } else {
@@ -1409,8 +1643,10 @@ function simulate(g: Game, dt: number) {
     } else {
       g.phase = "prep";
       g.paused = false;
+      if (wantsOffer(g)) g.offerOpen = true;
       say(g, `Night ${g.sent} is quiet. ${formatClock(elapsed)}.`);
       g.events.push("waveclear");
+      if (mode === "endless" && g.cleared >= 12) noteDeed("endless");
     }
   }
 }

@@ -1,0 +1,1 @@
+# https:// origin of the published game. The Android file reads the first word.

@@ -4,10 +4,12 @@ import {
   MAPS,
   MAP_ORDER,
   ROWS,
+  START_LIVES,
   TEAMS,
   TEAM_ORDER,
   TOWERS,
   cellCenter,
+  isTeamId,
   pathMask,
   upgradeCost,
   waypointXY,
@@ -16,6 +18,8 @@ import {
   type TeamId,
   type TowerId,
 } from "./balance";
+import { netSend } from "./online";
+import { noteDeed } from "./ledger";
 import {
   bindLeaveDuel,
   clickCell,
@@ -25,8 +29,10 @@ import {
   runQuiet,
   step,
   upgradeSelected,
+  type Enemy,
   type Game,
   type Phase,
+  type Tower,
 } from "./engine";
 
 export type PushId = "fledgling" | "ghoul" | "blackcourt" | "outsider";
@@ -53,6 +59,57 @@ const INCOME_EVERY = 2;
 const SEND_EVERY = 7;
 const RESERVE = 16;
 
+type Mind = {
+  reserve: number;
+  pace: number;
+  order: PushId[];
+  wait: Record<PushId, number>;
+  honeFirst: boolean;
+  cheap: boolean;
+};
+
+/** How a rival court spends. Dresden is the old even hand. */
+const MINDS: Record<TeamId, Mind> = {
+  dresden: {
+    reserve: RESERVE,
+    pace: SEND_EVERY,
+    order: ["outsider", "blackcourt", "ghoul", "fledgling"],
+    wait: { fledgling: 0, ghoul: 10, blackcourt: 24, outsider: 50 },
+    honeFirst: false,
+    cheap: false,
+  },
+  red: {
+    reserve: 4,
+    pace: 5,
+    order: ["fledgling", "ghoul", "blackcourt", "outsider"],
+    wait: { fledgling: 0, ghoul: 4, blackcourt: 28, outsider: 90 },
+    honeFirst: false,
+    cheap: true,
+  },
+  winter: {
+    reserve: 8,
+    pace: 9,
+    order: ["blackcourt", "ghoul", "outsider", "fledgling"],
+    wait: { fledgling: 36, ghoul: 20, blackcourt: 6, outsider: 45 },
+    honeFirst: true,
+    cheap: false,
+  },
+  summer: {
+    reserve: 18,
+    pace: 8,
+    order: ["ghoul", "fledgling", "blackcourt", "outsider"],
+    wait: { fledgling: 6, ghoul: 0, blackcourt: 30, outsider: 70 },
+    honeFirst: false,
+    cheap: false,
+  },
+};
+
+function mindOf(team: TeamId): Mind {
+  return MINDS[team] ?? MINDS.dresden;
+}
+
+export type FriendRole = "host" | "guest";
+
 export type DuelHud = {
   watch: "you" | "rival";
   youTeam: string;
@@ -71,6 +128,9 @@ export type DuelHud = {
   pushSpent: number;
   income: string;
   parked: boolean;
+  online: boolean;
+  role: FriendRole;
+  quiet: boolean;
 };
 
 type Site = { c: number; r: number };
@@ -89,6 +149,12 @@ type Session = {
   sites: Site[];
   siteCursor: number;
   setup: { map: MapId; you: TeamId; rival: TeamId };
+  online: boolean;
+  role: FriendRole;
+  friendRound: number;
+  toldDown: boolean;
+  quiet: boolean;
+  towerSig: string;
 };
 
 let session: Session | null = null;
@@ -143,23 +209,43 @@ function placeOn(g: Game, kind: TowerId, sites: Site[], cursor: { i: number }) {
 }
 
 function seedFoe(g: Game, sites: Site[]) {
+  const mind = mindOf(g.team);
   const units = TEAMS[g.team].units;
   const cursor = { i: 0 };
+  const first = units[0];
+  const second = mind.cheap ? units[0] : mind.honeFirst ? (units[2] ?? units[1]) : (units[1] ?? units[0]);
   runQuiet(() => {
-    placeOn(g, units[0], sites, cursor);
+    placeOn(g, first, sites, cursor);
+    if (mind.honeFirst) {
+      const tower = g.towers[0];
+      const cost = tower ? upgradeCost(tower.kind, tower.rank) : null;
+      if (tower && cost != null && g.gold - cost >= mind.reserve) {
+        g.selected = tower.id;
+        upgradeSelected(g);
+        g.selected = null;
+      }
+    }
     if (sites.length > 2) cursor.i = Math.min(sites.length - 1, 2);
-    placeOn(g, units[1] ?? units[0], sites, cursor);
+    if (g.gold >= TOWERS[second].cost + (mind.honeFirst ? mind.reserve : 0)) placeOn(g, second, sites, cursor);
     g.banner = "";
     g.bannerT = 0;
   });
   return cursor.i;
 }
 
+function pushKeep(mind: Mind) {
+  if (!mind.honeFirst) return mind.reserve + 20;
+  const armored = PUSHES.find((push) => push.id === "blackcourt")?.cost ?? 84;
+  return armored + mind.reserve;
+}
+
 function maybeUpgrade(g: Game) {
+  const mind = mindOf(g.team);
+  const floor = pushKeep(mind);
   for (const tower of g.towers) {
     const cost = upgradeCost(tower.kind, tower.rank);
     if (cost == null) continue;
-    if (g.gold - cost < RESERVE + 20) continue;
+    if (g.gold - cost < floor) continue;
     g.selected = tower.id;
     upgradeSelected(g);
     g.selected = null;
@@ -171,10 +257,16 @@ function maybeUpgrade(g: Game) {
 
 function maybePlace(session: Session) {
   const foe = session.foe;
-  if (foe.towers.length >= 4) return;
+  const mind = mindOf(foe.team);
+  if (foe.towers.length >= (mind.cheap ? 5 : 4)) return;
   const units = TEAMS[foe.team].units;
-  const kind = units[Math.min(units.length - 1, foe.towers.length)];
-  if (foe.gold < TOWERS[kind].cost + RESERVE + 10) return;
+  const kind = mind.cheap
+    ? units[0]
+    : mind.honeFirst
+      ? units[Math.min(units.length - 1, Math.max(1, foe.towers.length))]
+      : units[Math.min(units.length - 1, foe.towers.length)];
+  const keep = mind.honeFirst ? pushKeep(mind) - mind.reserve : 0;
+  if (foe.gold < TOWERS[kind].cost + mind.reserve + keep) return;
   const cursor = { i: session.siteCursor };
   if (placeOn(foe, kind, session.sites, cursor)) session.siteCursor = cursor.i;
 }
@@ -182,14 +274,15 @@ function maybePlace(session: Session) {
 function maybeSend(session: Session) {
   const foe = session.foe;
   const you = session.you;
-  const order = [...PUSHES].reverse();
-  const spec = order.find((push) => {
-    if (foe.gold - push.cost < RESERVE) return false;
-    if (push.kind === "outsider" && foe.combatTime < 50) return false;
-    if (push.kind === "blackcourt" && foe.combatTime < 24) return false;
-    if (push.kind === "ghoul" && foe.combatTime < 10) return false;
-    return true;
-  });
+  const mind = mindOf(foe.team);
+  const spec = mind.order
+    .map((id) => PUSHES.find((push) => push.id === id))
+    .find((push) => {
+      if (!push) return false;
+      if (foe.gold - push.cost < mind.reserve) return false;
+      if (foe.combatTime < mind.wait[push.id]) return false;
+      return true;
+    });
   if (!spec) return;
   foe.gold -= spec.cost;
   queueCreeps(you, spec.kind, spec.count, spec.interval);
@@ -204,12 +297,14 @@ function maybeSend(session: Session) {
 
 function bot(session: Session, sim: number) {
   if (session.foe.phase !== "combat" || session.you.phase !== "combat") return;
+  const mind = mindOf(session.foe.team);
   session.aiAcc += sim;
-  if (session.aiAcc < SEND_EVERY) return;
-  session.aiAcc -= SEND_EVERY;
+  if (session.aiAcc < mind.pace) return;
+  session.aiAcc -= mind.pace;
   runQuiet(() => {
-    maybeUpgrade(session.foe);
+    if (mind.honeFirst) maybeUpgrade(session.foe);
     maybePlace(session);
+    if (!mind.honeFirst) maybeUpgrade(session.foe);
     session.foe.banner = "";
     session.foe.bannerT = 0;
   });
@@ -248,8 +343,13 @@ export function getDuel(): DuelHud | null {
     rivalLeft: pressure(foe),
     lastPush: session.lastPush,
     pushSpent: session.pushSpent,
-    income: `${INCOME_GOLD} coin every ${INCOME_EVERY}s, both streets`,
+    income: session.online
+      ? `${INCOME_GOLD} coin every ${INCOME_EVERY}s on your street`
+      : `${INCOME_GOLD} coin every ${INCOME_EVERY}s, both streets`,
     parked: you.phase === "menu",
+    online: session.online,
+    role: session.role,
+    quiet: session.quiet,
   };
 }
 
@@ -311,6 +411,8 @@ export function startDuel(g: Game, mapId: MapId, youId: TeamId, rivalId: TeamId)
   fresh.team = you;
   fresh.phase = "combat";
   fresh.best = bests[map] ?? 0;
+  fresh.applyTrain = true;
+  fresh.limitRoster = true;
   Object.assign(g, fresh);
 
   const foe = createGame();
@@ -337,6 +439,12 @@ export function startDuel(g: Game, mapId: MapId, youId: TeamId, rivalId: TeamId)
     sites,
     siteCursor,
     setup: { map, you, rival },
+    online: false,
+    role: "host",
+    friendRound: 0,
+    toldDown: false,
+    quiet: false,
+    towerSig: "",
   };
   g.banner = `${TEAMS[you].name} against ${TEAMS[rival].name}. Build, or push creeps onto their street.`;
   g.bannerSeq += 1;
@@ -346,15 +454,330 @@ export function startDuel(g: Game, mapId: MapId, youId: TeamId, rivalId: TeamId)
 }
 
 export function rematch(g: Game) {
-  if (!session) return;
+  if (!session || session.online) return;
   const setup = session.setup;
   startDuel(g, setup.map, setup.you, setup.rival);
+}
+
+function asRecord(data: unknown): Record<string, unknown> | null {
+  if (!data || typeof data !== "object") return null;
+  return data as Record<string, unknown>;
+}
+
+function isMap(value: unknown): value is MapId {
+  return typeof value === "string" && MAP_ORDER.includes(value as MapId);
+}
+
+function isTower(value: unknown): value is TowerId {
+  return typeof value === "string" && value in TOWERS;
+}
+
+function isCreep(value: unknown): value is CreepId {
+  return typeof value === "string" && value in CREEPS;
+}
+
+function puppetTower(kind: TowerId, c: number, r: number, rank: number, id: number): Tower {
+  return {
+    id,
+    kind,
+    c,
+    r,
+    rank: Math.max(1, Math.min(3, rank)),
+    spent: 0,
+    cooldown: 0,
+    mode: "first",
+    angle: 0,
+    recoil: 0,
+  };
+}
+
+function puppetCreep(kind: CreepId, x: number, y: number, hp: number, max: number, face: number, id: number): Enemy {
+  const def = CREEPS[kind];
+  const maxHp = Math.max(1, max);
+  return {
+    id,
+    kind,
+    x,
+    y,
+    wp: 1,
+    along: x,
+    hp: Math.max(0, hp),
+    maxHp,
+    slow: 0,
+    stun: 0,
+    dot: 0,
+    dotT: 0,
+    siphon: 0,
+    dotHue: "",
+    face: Number.isFinite(face) && face !== 0 ? face : def.artFace,
+    flash: 0,
+    alive: hp > 0,
+    radius: def.radius,
+  };
+}
+
+function claimRemoteBreak(g: Game) {
+  if (!session) return;
+  const foe = session.foe;
+  if (foe.lives > 0) return;
+  if (g.phase !== "combat" && g.phase !== "menu") return;
+  g.phase = "victory";
+  g.placing = null;
+  g.paused = false;
+  g.banner = `${TEAMS[foe.team].name} broke.`;
+  g.bannerSeq += 1;
+  g.bannerT = 2.6;
+  g.events.push("victory");
+  session.dirty = true;
+}
+
+export function streetSnap() {
+  if (!session?.online) return null;
+  const g = session.you;
+  const live = g.phase === "combat" || (g.phase === "menu" && session.parked === "combat");
+  if (!live) return null;
+  return {
+    t: "snap" as const,
+    round: session.friendRound,
+    lives: g.lives,
+    gold: g.gold,
+    towers: g.towers.slice(0, 24).map((tower) => ({
+      kind: tower.kind,
+      c: tower.c,
+      r: tower.r,
+      rank: tower.rank,
+    })),
+    creeps: g.enemies
+      .filter((enemy) => enemy.alive)
+      .slice(0, 40)
+      .map((enemy) => ({
+        kind: enemy.kind,
+        x: Math.round(enemy.x),
+        y: Math.round(enemy.y),
+        hp: Math.round(enemy.hp),
+        max: enemy.maxHp,
+        face: enemy.face,
+      })),
+  };
+}
+
+export function applyFriendSnap(data: unknown) {
+  if (!session?.online) return;
+  const msg = asRecord(data);
+  if (!msg || msg.t !== "snap" || msg.round !== session.friendRound) return;
+  const foe = session.foe;
+  if (typeof msg.lives === "number" && Number.isFinite(msg.lives)) {
+    foe.lives = Math.max(0, Math.min(START_LIVES, Math.round(msg.lives)));
+  }
+  if (typeof msg.gold === "number" && Number.isFinite(msg.gold)) {
+    foe.gold = Math.max(0, Math.min(99999, Math.round(msg.gold)));
+  }
+  if (Array.isArray(msg.towers)) {
+    const next = msg.towers.slice(0, 24).flatMap((row, index) => {
+      const tower = asRecord(row);
+      if (!tower || !isTower(tower.kind)) return [];
+      const c = Number(tower.c);
+      const r = Number(tower.r);
+      if (!Number.isInteger(c) || c < 0 || c >= COLS) return [];
+      if (!Number.isInteger(r) || r < 0 || r >= ROWS) return [];
+      const rank = Number.isFinite(Number(tower.rank)) ? Math.round(Number(tower.rank)) : 1;
+      return [puppetTower(tower.kind, c, r, rank, index + 1)];
+    });
+    const sig = next.map((tower) => `${tower.kind}:${tower.c}:${tower.r}:${tower.rank}`).join("|");
+    if (sig !== session.towerSig) {
+      session.towerSig = sig;
+      foe.towers = next;
+    }
+  }
+  if (Array.isArray(msg.creeps)) {
+    foe.enemies = msg.creeps.slice(0, 40).flatMap((row, index) => {
+      const creep = asRecord(row);
+      if (!creep || !isCreep(creep.kind)) return [];
+      const x = Number(creep.x);
+      const y = Number(creep.y);
+      const hp = Number(creep.hp);
+      const max = Number(creep.max);
+      if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(hp)) return [];
+      const face = Number(creep.face);
+      return [puppetCreep(creep.kind, x, y, hp, Number.isFinite(max) ? max : hp, face, index + 1)];
+    });
+  }
+  const you = session.you;
+  claimRemoteBreak(you);
+  session.dirty = true;
+  refresh(you);
+}
+
+export function applyFriendPush(data: unknown) {
+  if (!session?.online) return;
+  const msg = asRecord(data);
+  if (!msg || msg.t !== "push" || msg.round !== session.friendRound) return;
+  const spec = PUSHES.find((push) => push.id === msg.id);
+  if (!spec) return;
+  const you = session.you;
+  const parked = you.phase === "menu";
+  if (parked) you.phase = "combat";
+  queueCreeps(you, spec.kind, spec.count, spec.interval);
+  if (parked && you.phase === "combat") you.phase = "menu";
+  session.lastPush = `${TEAMS[session.foe.team].name} pushed ${spec.label}.`;
+  you.banner = session.lastPush;
+  you.bannerSeq += 1;
+  you.bannerT = 2.2;
+  you.events.push(spec.kind === "outsider" ? "boss" : "wave");
+  session.dirty = true;
+  refresh(you);
+}
+
+export function noteFriendDown(data: unknown) {
+  if (!session?.online) return;
+  const msg = asRecord(data);
+  if (!msg || msg.t !== "down" || msg.round !== session.friendRound) return;
+  session.foe.lives = 0;
+  session.foe.phase = "defeat";
+  claimRemoteBreak(session.you);
+  refresh(session.you);
+}
+
+export function noteFriendQuiet() {
+  if (!session?.online || session.quiet) return;
+  session.quiet = true;
+  const g = session.you;
+  g.banner = "The other street went quiet. Leaving is not a win.";
+  g.bannerSeq += 1;
+  g.bannerT = 3.2;
+  session.dirty = true;
+  refresh(g);
+}
+
+export function noteFriendBack() {
+  if (!session?.online || !session.quiet) return;
+  session.quiet = false;
+  const g = session.you;
+  g.banner = "They're back on the other street.";
+  g.bannerSeq += 1;
+  g.bannerT = 2.4;
+  session.dirty = true;
+  refresh(g);
+}
+
+export function leaveFriend(g: Game) {
+  if (!session?.online || session.you !== g) return;
+  session = null;
+  g.duel = false;
+  g.phase = "menu";
+  g.paused = false;
+  g.speed = 1;
+  g.placing = null;
+  g.selected = null;
+  g.banner = "";
+  g.bannerT = 0;
+  refresh(g);
+}
+
+export function startFriendDuel(
+  g: Game,
+  mapId: MapId,
+  youId: TeamId,
+  rivalId: TeamId,
+  round: number,
+  role: FriendRole,
+) {
+  const map = MAP_ORDER.includes(mapId) ? mapId : "chicago";
+  const you = TEAM_ORDER.includes(youId) ? youId : "dresden";
+  const rival = TEAM_ORDER.includes(rivalId) ? rivalId : "winter";
+  const bests = g.bests;
+  const marks = g.marks;
+  const fresh = createGame();
+  fresh.duel = true;
+  fresh.bests = bests;
+  fresh.marks = marks;
+  fresh.map = map;
+  fresh.team = you;
+  fresh.phase = "combat";
+  fresh.speed = 1;
+  fresh.paused = false;
+  fresh.best = bests[map] ?? 0;
+  fresh.applyTrain = true;
+  fresh.limitRoster = true;
+  Object.assign(g, fresh);
+
+  const foe = createGame();
+  foe.duel = true;
+  foe.bests = bests;
+  foe.marks = marks;
+  foe.map = map;
+  foe.team = rival;
+  foe.phase = "combat";
+  foe.paused = true;
+  foe.speed = 1;
+
+  session = {
+    you: g,
+    foe,
+    watch: "you",
+    incomeYou: 0,
+    incomeFoe: 0,
+    aiAcc: 0,
+    pushSpent: 0,
+    lastPush: "Their street is live.",
+    dirty: true,
+    parked: "combat",
+    sites: [],
+    siteCursor: 0,
+    setup: { map, you, rival },
+    online: true,
+    role,
+    friendRound: Math.max(1, Math.round(round)),
+    toldDown: false,
+    quiet: false,
+    towerSig: "",
+  };
+  g.banner = `${TEAMS[you].name} against ${TEAMS[rival].name}. Build, or push creeps onto their street.`;
+  g.bannerSeq += 1;
+  g.bannerT = 3.2;
+  g.events.push("wave");
+  refresh(g);
+}
+
+export function applyFriendStart(g: Game, data: unknown, role: FriendRole) {
+  const msg = asRecord(data);
+  if (!msg || msg.t !== "start") return false;
+  if (!isMap(msg.map) || !isTeamId(msg.hostTeam) || !isTeamId(msg.guestTeam)) return false;
+  const round = typeof msg.round === "number" ? Math.round(msg.round) : 0;
+  if (round < 1) return false;
+  if (session?.online && session.friendRound === round && g.duel && g.phase !== "menu") return false;
+  const you = role === "host" ? msg.hostTeam : msg.guestTeam;
+  const foe = role === "host" ? msg.guestTeam : msg.hostTeam;
+  startFriendDuel(g, msg.map, you, foe, round, role);
+  return true;
+}
+
+export function acceptAgain(g: Game) {
+  if (!session?.online || session.role !== "host" || session.you !== g) return null;
+  const round = session.friendRound + 1;
+  const msg = {
+    t: "start" as const,
+    map: session.setup.map,
+    hostTeam: session.setup.you,
+    guestTeam: session.setup.rival,
+    round,
+  };
+  applyFriendStart(g, msg, "host");
+  return msg;
+}
+
+export function askAgain(g: Game) {
+  if (!session?.online || session.you !== g) return;
+  g.banner = "Asking them to walk it again.";
+  g.bannerSeq += 1;
+  g.bannerT = 2.4;
+  refresh(g);
 }
 
 export function pushCreep(g: Game, id: PushId) {
   if (!session || session.you !== g || !g.duel) return;
   if (g.phase !== "combat") return;
-  if (g.paused) {
+  if (g.paused && !session.online) {
     g.banner = "The street is held.";
     g.bannerSeq += 1;
     g.bannerT = 1.6;
@@ -373,7 +796,8 @@ export function pushCreep(g: Game, id: PushId) {
   }
   g.gold -= spec.cost;
   session.pushSpent += spec.cost;
-  queueCreeps(session.foe, spec.kind, spec.count, spec.interval);
+  if (session.online) netSend({ t: "push", id: spec.id, round: session.friendRound });
+  else queueCreeps(session.foe, spec.kind, spec.count, spec.interval);
   session.lastPush = `You pushed ${spec.label}.`;
   g.banner = session.lastPush;
   g.bannerSeq += 1;
@@ -387,6 +811,10 @@ export function pushCreep(g: Game, id: PushId) {
 export function stepDuel(g: Game, dt: number) {
   if (!g.duel || !session || session.you !== g) {
     step(g, dt);
+    return;
+  }
+  if (session.online) {
+    stepOnline(g, dt);
     return;
   }
   if (g.phase === "menu" || g.phase === "victory" || g.phase === "defeat") {
@@ -423,6 +851,11 @@ export function stepDuel(g: Game, dt: number) {
     g.bannerSeq += 1;
     g.bannerT = 2.6;
     g.events.push("victory");
+    if (!session.online) {
+      if (foe.team === "winter") noteDeed("winter");
+      else if (foe.team === "red") noteDeed("red");
+      else if (foe.team === "summer") noteDeed("summer");
+    }
     session.dirty = true;
     ended = true;
   } else if (youPhase === "defeat") {
@@ -440,6 +873,46 @@ export function stepDuel(g: Game, dt: number) {
     foe.lives !== foeLives ||
     ended;
   session.dirty = false;
+  if (changed) refresh(g);
+}
+
+function stepOnline(g: Game, dt: number) {
+  const live = session;
+  if (!live) return;
+  if (g.phase === "victory" || g.phase === "defeat") {
+    step(g, dt);
+    return;
+  }
+  const behindMenu = g.phase === "menu" && live.parked === "combat";
+  if (g.phase === "menu" && !behindMenu) {
+    step(g, dt);
+    return;
+  }
+  if (behindMenu) g.phase = "combat";
+  g.speed = 1;
+  g.paused = false;
+  const foe = live.foe;
+  const youGold = g.gold;
+  const youLives = g.lives;
+  const foeLives = foe.lives;
+  const before = g.combatTime || 0;
+  if (behindMenu) runQuiet(() => step(g, dt));
+  else step(g, dt);
+  if (g.phase === "combat") {
+    const sim = Math.max(0, (g.combatTime || 0) - before);
+    live.incomeYou = drip(g, sim, live.incomeYou);
+  }
+  foe.time += Math.min(0.05, Math.max(0, dt));
+  if ((g.phase as Phase) === "defeat" && !live.toldDown) {
+    live.toldDown = true;
+    netSend({ t: "down", round: live.friendRound });
+  } else if (foe.lives <= 0 && g.phase === "combat") {
+    claimRemoteBreak(g);
+  }
+  if (behindMenu && g.phase === "combat") g.phase = "menu";
+  const changed =
+    live.dirty || g.dirty || g.gold !== youGold || g.lives !== youLives || foe.lives !== foeLives;
+  live.dirty = false;
   if (changed) refresh(g);
 }
 

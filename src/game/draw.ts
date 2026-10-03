@@ -17,7 +17,12 @@ import {
   type MapId,
   type TowerId,
 } from "./balance";
+import { trainedStats } from "./ledger";
 import { placementStatus, type Game } from "./engine";
+
+function lookStats(g: Game, kind: TowerId, rank: number) {
+  return g.applyTrain ? trainedStats(kind, rank) : combatStats(kind, rank);
+}
 
 export type ArtBook = {
   maps: Partial<Record<MapId, HTMLImageElement>>;
@@ -240,10 +245,19 @@ export function draw(
         ctx.fill();
       }
     }
+    if (g.hint) {
+      const p = cellCenter(g.hint.c, g.hint.r);
+      const pulse = 16 + Math.sin(g.time * 5) * 5;
+      ctx.strokeStyle = "rgba(224,177,90,0.95)";
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, pulse, 0, Math.PI * 2);
+      ctx.stroke();
+    }
     if (g.hoverC >= 0 && g.hoverR >= 0) {
       const status = placementStatus(g, g.hoverC, g.hoverR, g.placing);
       if (status !== "bounds" && status !== "closed") {
-        const stats = combatStats(g.placing, 1);
+        const stats = lookStats(g, g.placing, 1);
         const p = cellCenter(g.hoverC, g.hoverR);
         strokeRange(ctx, p.x, p.y, stats.range * CELL, status === "ok");
         ctx.strokeStyle = status === "ok" ? "#e0b15a" : "#c4514d";
@@ -274,7 +288,7 @@ export function draw(
   } else if (g.selected != null) {
     const tower = g.towers.find((t) => t.id === g.selected);
     if (tower) {
-      const stats = combatStats(tower.kind, tower.rank);
+      const stats = lookStats(g, tower.kind, tower.rank);
       const p = cellCenter(tower.c, tower.r);
       strokeRange(ctx, p.x, p.y, stats.range * CELL, true);
     }

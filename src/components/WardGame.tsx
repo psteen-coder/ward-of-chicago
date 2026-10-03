@@ -19,9 +19,13 @@ import {
 } from "@/game/balance";
 import {
   PUSHES,
+  acceptAgain,
+  applyFriendStart,
+  askAgain,
   fastDuel,
   getDuel,
   holdWatch,
+  leaveFriend,
   parkDuel,
   pushCreep,
   rematch,
@@ -34,6 +38,16 @@ import {
   type DuelHud,
   type PushId,
 } from "@/game/battle";
+import { netSend } from "@/game/online";
+import {
+  EMPTY_SEAT,
+  FriendPanel,
+  FriendWire,
+  cleanTableCode,
+  makeTableCode,
+  type FriendLink,
+  type FriendSeat,
+} from "@/components/FriendTable";
 import { draw, emptyArt, type ArtBook } from "@/game/draw";
 import {
   WORLD_H,
@@ -58,13 +72,19 @@ import {
   setHover,
   setMode,
   startCase,
+  startStory,
   subscribe,
+  takeOffer,
   toMenu,
   togglePause,
   toggleSpeed,
   upgradeSelected,
+  playerRoster,
   type Hud,
 } from "@/game/engine";
+import { courtOpen, mapOpen, readLedger, serverLedger, subscribeLedger, towerOpen, trainedStats } from "@/game/ledger";
+import { CHAPTERS } from "@/game/story";
+import { DeedsPanel, StoryPanel, TrainPanel } from "@/components/Progress";
 
 declare global {
   interface Window {
@@ -78,6 +98,9 @@ declare global {
       push: (id: PushId) => void;
       watch: (side: "you" | "rival") => void;
       duel: () => DuelHud | null;
+      story: (index: number) => boolean;
+      offer: (kind: "coin" | "hone" | "ward") => void;
+      ledger: () => ReturnType<typeof readLedger>;
     };
   }
 }
@@ -177,14 +200,26 @@ function loadArt(art: ArtBook) {
   }
 }
 
+type DoorPanel = "main" | "case" | "battle" | "settings" | "multi" | "friend" | "story" | "train" | "deeds";
+
+function tableFromUrl() {
+  if (typeof window === "undefined") return "";
+  return cleanTableCode(new URLSearchParams(window.location.search).get("table") ?? "");
+}
+
 export function WardGame() {
   const hud = useSyncExternalStore(subscribe, getHud, getServerHud);
   const [muted, setMutedUi] = useState(false);
-  const [panel, setPanel] = useState<"main" | "case" | "battle" | "settings">("main");
+  const [panel, setPanel] = useState<DoorPanel>(() => (tableFromUrl().length === 4 ? "friend" : "main"));
   const [draftTeam, setDraftTeam] = useState<TeamId>("dresden");
   const [draftMap, setDraftMap] = useState<MapId>("chicago");
   const [draftMode, setDraftMode] = useState<ModeId>("standard");
   const [draftRival, setDraftRival] = useState<TeamId>("winter");
+  const [link, setLink] = useState<FriendLink | null>(null);
+  const [seat, setSeat] = useState<FriendSeat>(EMPTY_SEAT);
+  const [friendName, setFriendName] = useState("Warden");
+  const [friendCode, setFriendCode] = useState(() => tableFromUrl());
+  const [friendReady, setFriendReady] = useState(false);
   const [volume, setVolumeUi] = useState(85);
   const phone = usePhoneInstall();
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -252,7 +287,7 @@ export function WardGame() {
       const tag = (event.target as HTMLElement | null)?.tagName;
       if (tag === "INPUT" || tag === "TEXTAREA") return;
       const digits = ["Digit1", "Digit2", "Digit3", "Digit4", "Digit5"];
-      const roster = (TEAMS[g.team] ?? TEAMS.dresden).units;
+      const roster = playerRoster(g);
       const index = digits.indexOf(event.code);
       if (index >= 0 && roster[index]) {
         selectKind(g, roster[index]);
@@ -270,7 +305,7 @@ export function WardGame() {
       if (event.code === "Space" && tag !== "BUTTON") {
         event.preventDefault();
         if (g.phase === "prep") sendWave(g);
-        else if (g.phase === "combat") togglePause(g);
+        else if (g.phase === "combat" && !getDuel()?.online) togglePause(g);
       }
     };
     window.addEventListener("keydown", onKey);
@@ -288,6 +323,9 @@ export function WardGame() {
       push: (id: PushId) => pushCreep(g, id),
       watch: (side: "you" | "rival") => setWatch(side),
       duel: () => getDuel(),
+      story: (index: number) => startStory(g, index),
+      offer: (kind: "coin" | "hone" | "ward") => takeOffer(g, kind),
+      ledger: () => readLedger(),
     };
 
     return () => {
@@ -306,8 +344,54 @@ export function WardGame() {
   };
 
   const duel = getDuel();
-  const canSend = !duel && hud.phase === "prep" && (hud.mode === "endless" || hud.sent < hud.total);
+  const canSend =
+    !duel &&
+    hud.phase === "prep" &&
+    !hud.offerOpen &&
+    !hud.coachBlocks &&
+    (hud.mode === "endless" || hud.sent < hud.total);
   const playing = hud.phase === "prep" || hud.phase === "combat";
+
+  const dropLink = () => {
+    setLink(null);
+    setFriendReady(false);
+    setSeat(EMPTY_SEAT);
+    leaveFriend(ensureGame());
+  };
+
+  const hostTable = () => {
+    unlockAudio();
+    const code = makeTableCode();
+    const name = friendName.trim().slice(0, 24) || "Warden";
+    setFriendReady(false);
+    setSeat(EMPTY_SEAT);
+    setLink({ role: "host", code, name });
+  };
+
+  const joinTable = () => {
+    const code = cleanTableCode(friendCode);
+    if (code.length !== 4) return;
+    unlockAudio();
+    const name = friendName.trim().slice(0, 24) || "Warden";
+    setFriendReady(false);
+    setSeat(EMPTY_SEAT);
+    setLink({ role: "guest", code, name });
+  };
+
+  const beginTable = () => {
+    if (!link || link.role !== "host" || !seat.peerTeam) return;
+    unlockAudio();
+    const msg = {
+      t: "start" as const,
+      map: draftMap,
+      hostTeam: draftTeam,
+      guestTeam: seat.peerTeam,
+      round: 1,
+    };
+    applyFriendStart(ensureGame(), msg, "host");
+    netSend(msg);
+    setPanel("main");
+  };
 
   const dismissTip = () => {
     if (hideTipTimer.current != null) window.clearTimeout(hideTipTimer.current);
@@ -381,6 +465,9 @@ export function WardGame() {
             <Coins className="size-4 text-primary" aria-hidden />
             <span className="num text-sm font-semibold">{hud.gold}</span>
           </span>
+          {hud.stoopWard ? (
+            <span className="shrink-0 text-sm font-semibold text-ward">Ward</span>
+          ) : null}
           {duel && playing ? (
             <span
               className={`flex shrink-0 items-center gap-1 ${duel.rivalLives <= 5 ? "text-danger" : ""}`}
@@ -478,6 +565,55 @@ export function WardGame() {
 
       <footer className="safe-pad safe-x shrink-0 border-t border-line bg-surface">
         <div className="mx-auto flex w-full max-w-3xl flex-col">
+          {hud.coach ? (
+            <p id="coach" className="px-1 pt-2 text-sm leading-relaxed text-fg">
+              {hud.coach}
+            </p>
+          ) : null}
+          {hud.offerOpen ? (
+            <div className="px-1 pt-2">
+              <p className="text-sm leading-relaxed text-muted">
+                {hud.offerLesson
+                  ? "The street offers one gift. It lasts the next night. Pick one."
+                  : "The street offers one gift for the next night."}
+              </p>
+              <div className="mt-2 grid grid-cols-3 gap-2">
+                <button
+                  id="offer-coin"
+                  type="button"
+                  className="min-h-11 rounded-lg bg-primary px-1 text-sm font-semibold text-primary-fg"
+                  onClick={() => {
+                    unlockAudio();
+                    takeOffer(ensureGame(), "coin");
+                  }}
+                >
+                  +40 coin
+                </button>
+                <button
+                  id="offer-hone"
+                  type="button"
+                  className="min-h-11 rounded-lg border border-line px-1 text-sm font-semibold"
+                  onClick={() => {
+                    unlockAudio();
+                    takeOffer(ensureGame(), "hone");
+                  }}
+                >
+                  Free hone
+                </button>
+                <button
+                  id="offer-ward"
+                  type="button"
+                  className="min-h-11 rounded-lg border border-line px-1 text-sm font-semibold"
+                  onClick={() => {
+                    unlockAudio();
+                    takeOffer(ensureGame(), "ward");
+                  }}
+                >
+                  Stoop ward
+                </button>
+              </div>
+            </div>
+          ) : null}
           {tip ? (
             <TowerCard
               kind={tip}
@@ -492,7 +628,7 @@ export function WardGame() {
           ) : null}
           {hud.selected && !tip ? <SelectedBar hud={hud} /> : null}
           <div className="flex gap-1 overflow-x-auto py-1.5" role="toolbar" aria-label="Defenders">
-            {TEAMS[hud.team].units.map((kind) => (
+            {hud.roster.map((kind) => (
               <TowerPick
                 key={kind}
                 kind={kind}
@@ -561,6 +697,7 @@ export function WardGame() {
               className="grid size-10 shrink-0 place-items-center rounded-xl border border-line"
               aria-label={hud.speed === 1 ? "Double speed" : "Normal speed"}
               aria-pressed={hud.speed === 2}
+              hidden={!!duel?.online}
               onClick={() => {
                 unlockAudio();
                 toggleSpeed(ensureGame());
@@ -568,7 +705,7 @@ export function WardGame() {
             >
               <span className="num text-sm">{hud.speed}×</span>
             </button>
-            {hud.phase === "combat" ? (
+            {hud.phase === "combat" && !duel?.online ? (
               <button
                 type="button"
                 className="grid size-10 shrink-0 place-items-center rounded-xl border border-line"
@@ -600,7 +737,7 @@ export function WardGame() {
           <div className="absolute inset-0 bg-bg/80 backdrop-blur-sm" />
           <div className="relative w-full max-w-md rounded-2xl border border-line bg-surface p-6 text-center sm:p-8">
             <p className="text-xs tracking-widest text-primary">
-              {duel ? "THE BATTLE" : hud.phase === "victory" ? "DAWN" : "THE DOOR"}
+              {duel ? "THE BATTLE" : hud.story != null ? "THE CASE" : hud.phase === "victory" ? "DAWN" : "THE DOOR"}
             </p>
             <p
               className={`mt-2 font-display text-3xl leading-tight ${hud.phase === "defeat" ? "text-danger" : "text-fg"}`}
@@ -609,7 +746,11 @@ export function WardGame() {
                 ? hud.phase === "victory"
                   ? "Their door broke"
                   : "Your door broke"
-                : hud.phase === "victory"
+                : hud.story != null
+                  ? hud.phase === "victory"
+                    ? hud.storyTitle
+                    : "The chapter broke"
+                  : hud.phase === "victory"
                   ? hud.mode === "speed"
                     ? "The clock stopped"
                     : "Dawn held"
@@ -620,14 +761,18 @@ export function WardGame() {
             <p className="mt-1 text-sm text-primary">
               {duel
                 ? `${duel.youTeam} vs ${duel.rivalTeam} · ${duel.mapPlace}`
-                : `${hud.modeName} · ${hud.teamName} · ${hud.mapPlace}`}
+                : hud.story != null
+                  ? `${hud.storyTitle} · ${hud.mapPlace}`
+                  : `${hud.modeName} · ${hud.teamName} · ${hud.mapPlace}`}
             </p>
             <p className="mt-3 text-sm leading-relaxed text-muted">
               {duel
                 ? hud.phase === "victory"
                   ? "The rival court could not hold the other street."
                   : "Your street gave way. Theirs is still standing."
-                : hud.phase === "victory" && hud.mode === "speed"
+                : hud.story != null
+                  ? hud.epilogue || hud.coach
+                  : hud.phase === "victory" && hud.mode === "speed"
                   ? "Ten nights, back to back. The score is how long the fight took, not how fast the clock on the wall ran."
                   : hud.phase === "victory"
                     ? `Ten nights on ${hud.mapPlace.toLowerCase()}. The last door still holds.`
@@ -642,11 +787,19 @@ export function WardGame() {
               className="mt-6 min-h-12 w-full rounded-xl bg-primary font-semibold text-primary-fg"
               onClick={() => {
                 unlockAudio();
-                if (duel) rematch(ensureGame());
+                if (duel?.online) {
+                  if (duel.role === "host") {
+                    const start = acceptAgain(ensureGame());
+                    if (start) netSend(start);
+                  } else {
+                    netSend({ t: "again" });
+                    askAgain(ensureGame());
+                  }
+                } else if (duel) rematch(ensureGame());
                 else restart(ensureGame());
               }}
             >
-              Walk it again
+              {duel?.online && duel.role === "guest" ? "Ask to walk it again" : "Walk it again"}
             </button>
             <button
               id="main-menu"
@@ -694,6 +847,28 @@ export function WardGame() {
             setVolumeUi(Math.round(getVolume() * 100));
           }}
           phone={phone}
+          link={link}
+          seat={seat}
+          friendName={friendName}
+          friendCode={friendCode}
+          friendReady={friendReady}
+          onFriendName={setFriendName}
+          onFriendCode={setFriendCode}
+          onFriendReady={setFriendReady}
+          onHost={hostTable}
+          onJoin={joinTable}
+          onBegin={beginTable}
+          onDropLink={dropLink}
+        />
+      ) : null}
+      {link ? (
+        <FriendWire
+          key={`${link.role}:${link.code}:${link.name}`}
+          link={link}
+          team={draftTeam}
+          map={draftMap}
+          ready={friendReady}
+          onSeat={setSeat}
         />
       ) : null}
     </div>
@@ -717,16 +892,28 @@ function FrontDoor({
   onVolume,
   onMute,
   phone,
+  link,
+  seat,
+  friendName,
+  friendCode,
+  friendReady,
+  onFriendName,
+  onFriendCode,
+  onFriendReady,
+  onHost,
+  onJoin,
+  onBegin,
+  onDropLink,
 }: {
   hud: Hud;
-  panel: "main" | "case" | "battle" | "settings";
+  panel: DoorPanel;
   volume: number;
   muted: boolean;
   draftTeam: TeamId;
   draftMap: MapId;
   draftMode: ModeId;
   draftRival: TeamId;
-  onPanel: (panel: "main" | "case" | "battle" | "settings") => void;
+  onPanel: (panel: DoorPanel) => void;
   onTeam: (id: TeamId) => void;
   onMap: (id: MapId) => void;
   onMode: (id: ModeId) => void;
@@ -734,9 +921,24 @@ function FrontDoor({
   onVolume: (value: number) => void;
   onMute: () => void;
   phone: ReturnType<typeof usePhoneInstall>;
+  link: FriendLink | null;
+  seat: FriendSeat;
+  friendName: string;
+  friendCode: string;
+  friendReady: boolean;
+  onFriendName: (value: string) => void;
+  onFriendCode: (value: string) => void;
+  onFriendReady: (value: boolean) => void;
+  onHost: () => void;
+  onJoin: () => void;
+  onBegin: () => void;
+  onDropLink: () => void;
 }) {
   const offerInstall = !phone.standalone && !phone.installed && (phone.android || phone.canPrompt);
   const duel = getDuel();
+  const book = useSyncExternalStore(subscribeLedger, readLedger, serverLedger);
+  const caseDone = book.cleared >= CHAPTERS.length;
+  const nextChapter = CHAPTERS[Math.min(book.cleared, CHAPTERS.length - 1)];
   return (
     <div className="absolute inset-0 z-40 overflow-y-auto bg-bg">
       <div className={`safe-menu mx-auto flex min-h-full w-full max-w-5xl flex-col ${panel === "main" ? "justify-center" : ""}`}>
@@ -749,6 +951,20 @@ function FrontDoor({
             onBack={() => onPanel("main")}
             phone={phone}
           />
+        ) : panel === "story" ? (
+          <StoryPanel
+            onBack={() => onPanel("main")}
+            onStart={(index) => {
+              unlockAudio();
+              onDropLink();
+              onPanel("main");
+              startStory(ensureGame(), index);
+            }}
+          />
+        ) : panel === "train" ? (
+          <TrainPanel onBack={() => onPanel("main")} />
+        ) : panel === "deeds" ? (
+          <DeedsPanel onBack={() => onPanel("main")} />
         ) : panel === "case" ? (
           <CasePanel
             hud={hud}
@@ -761,6 +977,7 @@ function FrontDoor({
             onBack={() => onPanel("main")}
             onStart={() => {
               unlockAudio();
+              onDropLink();
               onPanel("main");
               newGame(ensureGame(), draftMap, draftTeam, draftMode);
             }}
@@ -773,12 +990,67 @@ function FrontDoor({
             onTeam={onTeam}
             onRival={onRival}
             onMap={onMap}
-            onBack={() => onPanel("main")}
+            onBack={() => onPanel("multi")}
             onStart={() => {
               unlockAudio();
+              onDropLink();
               onPanel("main");
               startDuel(ensureGame(), draftMap, draftTeam, draftRival);
             }}
+          />
+        ) : panel === "multi" ? (
+          <div>
+            <button id="multi-back" type="button" className="min-h-11 rounded-lg px-1 text-sm text-muted" onClick={() => onPanel("main")}>
+              Back
+            </button>
+            <h2 className="mt-3 font-display text-4xl leading-tight text-fg">Multiplayer</h2>
+            <p className="mt-2 max-w-xl text-sm leading-relaxed text-muted">
+              Sit a friend at another screen, or fight a rival court on this one. Either way, the first broken door loses.
+            </p>
+            <div className="mt-6 flex flex-col gap-3">
+              <button
+                id="play-friend"
+                type="button"
+                className="min-h-14 w-full rounded-xl bg-primary px-4 py-3 text-left font-semibold text-primary-fg"
+                onClick={() => onPanel("friend")}
+              >
+                <span className="block text-lg">With a friend</span>
+                <span className="mt-0.5 block text-sm font-normal opacity-80">
+                  Share a short code. Each of you holds a street.
+                </span>
+              </button>
+              <button
+                id="play-local"
+                type="button"
+                className="min-h-14 w-full rounded-xl border border-line bg-surface px-4 py-3 text-left font-semibold text-fg"
+                onClick={() => onPanel("battle")}
+              >
+                <span className="block text-lg">On this device</span>
+                <span className="mt-0.5 block text-sm font-normal text-muted">
+                  A rival court plays the other street here.
+                </span>
+              </button>
+            </div>
+          </div>
+        ) : panel === "friend" ? (
+          <FriendPanel
+            link={link}
+            seat={seat}
+            name={friendName}
+            code={friendCode}
+            ready={friendReady}
+            team={draftTeam}
+            map={draftMap}
+            onName={onFriendName}
+            onCode={onFriendCode}
+            onTeam={onTeam}
+            onMap={onMap}
+            onReady={onFriendReady}
+            onHost={onHost}
+            onJoin={onJoin}
+            onBegin={onBegin}
+            onLeave={onDropLink}
+            onBack={() => onPanel("multi")}
           />
         ) : (
           <div className="grid items-center gap-10 lg:grid-cols-2">
@@ -786,8 +1058,7 @@ function FrontDoor({
               <p className="text-xs tracking-widest text-primary">AN UNOFFICIAL NIGHT</p>
               <h2 className="mt-3 font-display text-4xl leading-tight text-fg sm:text-6xl">Ward of Chicago</h2>
               <p className="mt-4 max-w-md text-base leading-relaxed text-muted">
-                Single player is a night on your own. Multiplayer is a local battle:
-                your court holds one street, a rival court holds the other.
+                The case teaches the street, then swears new crafts and new roads. A night on your own uses whatever you have already unlocked.
               </p>
               <p className="mt-8 max-w-md text-xs leading-relaxed text-muted">
                 A fan game. Not affiliated with Jim Butcher or the rights holders.
@@ -805,6 +1076,7 @@ function FrontDoor({
                   }`}
                   onClick={() => {
                     unlockAudio();
+                    onDropLink();
                     onPanel("main");
                     continueGame(ensureGame());
                   }}
@@ -827,42 +1099,97 @@ function FrontDoor({
                   className="min-h-14 w-full rounded-xl bg-primary px-4 py-3 text-left font-semibold text-primary-fg"
                   onClick={() => {
                     unlockAudio();
+                    if (!duel.online) onDropLink();
                     onPanel("main");
                     resumeDuel(ensureGame());
                   }}
                 >
                   <span className="block text-lg">Continue battle</span>
                   <span className="mt-0.5 block text-sm font-normal opacity-80">
-                    {duel.youTeam} vs {duel.rivalTeam} · {duel.mapPlace}
+                    {duel.online && duel.quiet
+                      ? "The other street went quiet."
+                      : duel.online
+                        ? "The night is still running."
+                        : `${duel.youTeam} vs ${duel.rivalTeam} · ${duel.mapPlace}`}
                   </span>
                 </button>
               ) : null}
               <button
-                id="play-single"
+                id="play-story"
                 type="button"
                 className={`min-h-14 w-full rounded-xl px-4 py-3 text-left font-semibold ${
                   hud.hasSave || duel?.parked
                     ? "border border-line bg-surface text-fg"
                     : "bg-primary text-primary-fg"
                 }`}
+                onClick={() => {
+                  unlockAudio();
+                  if (caseDone || !nextChapter) {
+                    onPanel("story");
+                    return;
+                  }
+                  onDropLink();
+                  onPanel("main");
+                  startStory(ensureGame(), book.cleared);
+                }}
+              >
+                <span className="block text-lg">
+                  {caseDone ? "The case" : book.cleared === 0 ? "Begin the case" : "Continue the case"}
+                </span>
+                <span className={`mt-0.5 block text-sm font-normal ${hud.hasSave || duel?.parked ? "text-muted" : "opacity-80"}`}>
+                  {caseDone
+                    ? "Every chapter is open. Walk one again."
+                    : `${nextChapter?.title ?? "The gold dot"}. ${nextChapter?.reward ?? ""}`}
+                </span>
+              </button>
+              <button
+                id="play-single"
+                type="button"
+                className="min-h-14 w-full rounded-xl border border-line bg-surface px-4 py-3 text-left font-semibold text-fg"
                 onClick={() => onPanel("case")}
               >
-                <span className="block text-lg">Single player</span>
-                <span className={`mt-0.5 block text-sm font-normal ${hud.hasSave || duel?.parked ? "text-muted" : "opacity-80"}`}>
-                  Night, court, and ground.
+                <span className="block text-lg">A night on your own</span>
+                <span className="mt-0.5 block text-sm font-normal text-muted">
+                  Standard, endless, or speed. Only what the case has opened.
                 </span>
               </button>
               <button
                 id="play-multi"
                 type="button"
                 className="min-h-14 w-full rounded-xl border border-line bg-surface px-4 py-3 text-left font-semibold text-fg"
-                onClick={() => onPanel("battle")}
+                onClick={() => onPanel("multi")}
               >
                 <span className="block text-lg">Multiplayer</span>
                 <span className="mt-0.5 block text-sm font-normal text-muted">
-                  A local battle on this device. Your court against a rival court.
+                  A friend on another screen, or a rival court on this one.
                 </span>
               </button>
+              <div className="grid grid-cols-3 gap-3">
+                <button
+                  id="open-chapters"
+                  type="button"
+                  className="min-h-12 rounded-xl border border-line bg-surface px-2 text-sm font-semibold"
+                  onClick={() => onPanel("story")}
+                >
+                  Chapters
+                </button>
+                <button
+                  id="open-train"
+                  type="button"
+                  className="min-h-12 rounded-xl border border-line bg-surface px-2 text-sm font-semibold"
+                  onClick={() => onPanel("train")}
+                >
+                  Training
+                </button>
+                <button
+                  id="open-deeds"
+                  type="button"
+                  className="min-h-12 rounded-xl border border-line bg-surface px-2 text-sm font-semibold"
+                  onClick={() => onPanel("deeds")}
+                >
+                  Deeds
+                </button>
+              </div>
               <button
                 id="settings"
                 type="button"
@@ -929,17 +1256,21 @@ function BattlePanel({
         {TEAM_ORDER.map((id) => {
           const def = TEAMS[id];
           const on = id === draftTeam;
+          const shut = !courtOpen(id);
           return (
             <button
               key={id}
               id={`you-${id}`}
               type="button"
               aria-pressed={on}
-              className={`min-h-11 rounded-xl border p-3 text-left ${on ? "border-primary bg-surface-2" : "border-line bg-surface"}`}
+              disabled={shut}
+              className={`min-h-11 rounded-xl border p-3 text-left disabled:opacity-40 ${on ? "border-primary bg-surface-2" : "border-line bg-surface"}`}
               onClick={() => onTeam(id)}
             >
               <span className="font-display text-lg leading-tight">{def.name}</span>
-              <span className="mt-1 block text-sm leading-relaxed text-muted">{def.blurb}</span>
+              <span className="mt-1 block text-sm leading-relaxed text-muted">
+                {shut ? "Still shut. The case opens this court." : def.blurb}
+              </span>
             </button>
           );
         })}
@@ -970,17 +1301,21 @@ function BattlePanel({
         {MAP_ORDER.map((id) => {
           const def = MAPS[id];
           const on = id === draftMap;
+          const shut = !mapOpen(id);
           return (
             <button
               key={id}
               id={`ground-${id}`}
               type="button"
               aria-pressed={on}
-              className={`min-h-11 rounded-xl border p-3 text-left ${on ? "border-primary bg-surface-2" : "border-line bg-surface"}`}
+              disabled={shut}
+              className={`min-h-11 rounded-xl border p-3 text-left disabled:opacity-40 ${on ? "border-primary bg-surface-2" : "border-line bg-surface"}`}
               onClick={() => onMap(id)}
             >
               <span className="font-display text-lg leading-tight">{def.name}</span>
-              <span className="mt-1 block text-sm leading-relaxed text-muted">{def.blurb}</span>
+              <span className="mt-1 block text-sm leading-relaxed text-muted">
+                {shut ? "Still shut. The case opens this road." : def.blurb}
+              </span>
             </button>
           );
         })}
@@ -988,7 +1323,8 @@ function BattlePanel({
       <button
         id="duel-start"
         type="button"
-        className="mt-6 min-h-12 w-full rounded-xl bg-primary font-semibold text-primary-fg"
+        className="mt-6 min-h-12 w-full rounded-xl bg-primary font-semibold text-primary-fg disabled:opacity-40"
+        disabled={!courtOpen(draftTeam) || !mapOpen(draftMap)}
         onClick={onStart}
       >
         Start battle · {TEAMS[draftTeam].name} vs {TEAMS[draftRival].name}
@@ -1054,29 +1390,34 @@ function CasePanel({
         {TEAM_ORDER.map((id) => {
           const def = TEAMS[id];
           const on = id === draftTeam;
+          const shut = !courtOpen(id);
           return (
             <button
               key={id}
               id={`team-${id}`}
               type="button"
               aria-pressed={on}
-              className={`min-h-11 rounded-xl border p-3 text-left ${on ? "border-primary bg-surface-2" : "border-line bg-surface"}`}
+              disabled={shut}
+              className={`min-h-11 rounded-xl border p-3 text-left disabled:opacity-40 ${on ? "border-primary bg-surface-2" : "border-line bg-surface"}`}
               onClick={() => onTeam(id)}
             >
               <span className="font-display text-lg leading-tight">{def.name}</span>
-              <span className="mt-1 block text-sm leading-relaxed text-muted">{def.blurb}</span>
+              <span className="mt-1 block text-sm leading-relaxed text-muted">
+                {shut ? "Still shut. The case opens this court." : def.blurb}
+              </span>
             </button>
           );
         })}
       </div>
       <p className="mt-3 text-sm text-primary">
-        {team.units.map((id) => TOWERS[id].name).join(" · ")}
+        {team.units.filter((id) => towerOpen(id)).map((id) => TOWERS[id].name).join(" · ")}
       </p>
       <p className="mt-6 text-xs tracking-widest text-muted">GROUND</p>
       <div className="mt-2 grid gap-2 sm:grid-cols-2">
         {MAP_ORDER.map((id) => {
           const def = MAPS[id];
           const on = id === draftMap;
+          const shut = !mapOpen(id);
           const mark =
             draftMode === "endless"
               ? (hud.marks.endless[id] ?? 0)
@@ -1097,17 +1438,20 @@ function CasePanel({
               id={`level-${id}`}
               type="button"
               aria-pressed={on}
-              className={`min-h-11 rounded-xl border p-3 text-left ${on ? "border-primary bg-surface-2" : "border-line bg-surface"}`}
+              disabled={shut}
+              className={`min-h-11 rounded-xl border p-3 text-left disabled:opacity-40 ${on ? "border-primary bg-surface-2" : "border-line bg-surface"}`}
               onClick={() => onMap(id)}
             >
               <span className="flex items-baseline justify-between gap-3">
                 <span className="font-display text-lg leading-tight">{def.name}</span>
                 <span className="flex shrink-0 items-center gap-1 text-xs text-muted">
                   <Moon className="size-3.5 text-primary" aria-hidden />
-                  {markLabel}
+                  {shut ? "Shut" : markLabel}
                 </span>
               </span>
-              <span className="mt-1 block text-sm leading-relaxed text-muted">{def.blurb}</span>
+              <span className="mt-1 block text-sm leading-relaxed text-muted">
+                {shut ? "Still shut. The case opens this road." : def.blurb}
+              </span>
             </button>
           );
         })}
@@ -1115,7 +1459,8 @@ function CasePanel({
       <button
         id="start-case"
         type="button"
-        className="mt-6 min-h-12 w-full rounded-xl bg-primary px-3 font-semibold text-primary-fg"
+        className="mt-6 min-h-12 w-full rounded-xl bg-primary px-3 font-semibold text-primary-fg disabled:opacity-40"
+        disabled={!courtOpen(draftTeam) || !mapOpen(draftMap)}
         onClick={onStart}
       >
         Start · {mode.name} · {team.name}
@@ -1175,7 +1520,17 @@ function SettingsPanel({
         <div className="mt-10 border-t border-line pt-8">
           <h3 className="font-display text-2xl text-fg">On a phone</h3>
           <p className="mt-2 text-sm leading-relaxed text-muted">
-            The computer layout stays in a wide window. On a phone, add the game to your home screen and it opens full screen. There is no store download.
+            The computer layout stays in a wide window. On a phone, add the game to your home screen, or install the Android file.
+          </p>
+          <a
+            id="download-apk"
+            href="https://github.com/psteen-coder/ward-of-chicago/releases/download/v1.0.0/Ward-of-Chicago.apk"
+            className="mt-4 flex min-h-12 w-full items-center justify-center rounded-xl border border-line bg-surface font-semibold text-fg"
+          >
+            Download the Android file
+          </a>
+          <p className="mt-2 text-sm leading-relaxed text-muted">
+            Open the file on the phone and allow the install. If an older Ward of Chicago is already there and will not update, remove it first. The file can join a friend table once it has this website's address.
           </p>
           {phone.installed ? (
             <p className="mt-4 text-sm text-primary">Added. Open Ward of Chicago from your home screen.</p>
@@ -1414,7 +1769,7 @@ function TowerCard({
   onDismiss: () => void;
 }) {
   const def = TOWERS[kind];
-  const stats = combatStats(kind, 1);
+  const stats = trainedStats(kind, 1);
   const extra = extraLine(stats);
   return (
     <div
@@ -1480,6 +1835,7 @@ function SelectedBar({ hud }: { hud: Hud }) {
           ).map(([mode, label]) => (
             <button
               key={mode}
+              id={`aim-${mode}`}
               type="button"
               aria-label={mode === "nearest" ? "Nearest" : mode === "strongest" ? "Strongest" : "First"}
               aria-pressed={sel.mode === mode}
@@ -1494,6 +1850,7 @@ function SelectedBar({ hud }: { hud: Hud }) {
         </div>
         {sel.upgrade != null ? (
           <button
+            id="hone"
             type="button"
             className="h-9 shrink-0 rounded-lg bg-primary px-2.5 text-xs font-semibold text-primary-fg"
             onClick={() => {
@@ -1501,12 +1858,13 @@ function SelectedBar({ hud }: { hud: Hud }) {
               upgradeSelected(ensureGame());
             }}
           >
-            Hone {sel.upgrade}
+            Hone {sel.upgrade === 0 ? "free" : sel.upgrade}
           </button>
         ) : (
           <span className="flex h-9 shrink-0 items-center px-1 text-xs text-muted">Warden</span>
         )}
         <button
+          id="sell"
           type="button"
           className="h-9 shrink-0 rounded-lg border border-line px-2.5 text-xs text-danger"
           onClick={() => {
