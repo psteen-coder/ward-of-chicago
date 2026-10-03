@@ -39,7 +39,7 @@ import {
   type TeamId,
   type TowerId,
 } from "./balance";
-import { noteDeed, openRoster, trainedStats } from "./ledger";
+import { grantFavor, noteDeed, openRoster, readLedger, trainedStats } from "./ledger";
 import {
   CHAPTERS,
   canPlayChapter,
@@ -157,6 +157,8 @@ export type Game = {
   goldEarned: number;
   /** Lives the door has already paid. */
   livesLost: number;
+  /** Something reached the door this run, even if a stoop ward caught it. */
+  leaked: boolean;
   /** Simulated seconds for each night that fully cleared. */
   roundTimes: number[];
   /** Simulated combat seconds. Pause, prep, and 2× playback do not change it. */
@@ -306,6 +308,7 @@ type SaveFile = {
   mode?: ModeId;
   goldEarned?: number;
   livesLost?: number;
+  leaked?: boolean;
   roundTimes?: number[];
   combatTime?: number;
   roundMark?: number;
@@ -343,6 +346,7 @@ export function createGame(): Game {
     duel: false,
     goldEarned: 0,
     livesLost: 0,
+    leaked: false,
     roundTimes: [],
     combatTime: 0,
     roundMark: 0,
@@ -672,6 +676,11 @@ function endGame(g: Game, phase: "victory" | "defeat") {
   }
   if (g.story != null) {
     g.epilogue = phase === "victory" ? claimChapter(g.story) : "The chapter broke. The swearing waits.";
+    if (phase === "victory" && !g.leaked) {
+      noteDeed(`clean-${g.story}`);
+      const sealed = CHAPTERS.every((_, index) => readLedger().deeds.includes(`clean-${index}`));
+      if (sealed) noteDeed("clean-all");
+    }
     clearSave();
     g.events.push(phase);
     g.dirty = true;
@@ -742,6 +751,7 @@ function writeSave(g: Game) {
     spawnAcc: g.spawnAcc,
     goldEarned: g.goldEarned || 0,
     livesLost: g.livesLost || 0,
+    leaked: Boolean(g.leaked),
     roundTimes: Array.isArray(g.roundTimes) ? g.roundTimes.slice() : [],
     combatTime: g.combatTime || 0,
     roundMark: g.roundMark || 0,
@@ -818,6 +828,7 @@ function applySave(g: Game, data: SaveFile) {
   fresh.time = Number(data.time) || 0;
   fresh.goldEarned = Math.max(0, Math.floor(Number(data.goldEarned)) || 0);
   fresh.livesLost = Math.max(0, Math.floor(Number(data.livesLost)) || 0);
+  fresh.leaked = Boolean(data.leaked) || fresh.livesLost > 0;
   fresh.combatTime = Math.max(0, Number(data.combatTime) || 0);
   fresh.roundMark = Math.max(0, Number(data.roundMark) || 0);
   fresh.roundTimes = Array.isArray(data.roundTimes)
@@ -1118,7 +1129,7 @@ export function clickCell(g: Game, c: number, r: number) {
   emit(g);
 }
 
-export function upgradeSelected(g: Game) {
+export function upgradeSelected(g: Game, pay = true) {
   if (g.duel && g.paused) {
     say(g, "The street is held.");
     emit(g);
@@ -1143,7 +1154,8 @@ export function upgradeSelected(g: Game) {
   if (g.freeHone) g.freeHone = false;
   else tower.spent += cost;
   tower.rank += 1;
-  say(g, `${TOWERS[tower.kind].name} is ${RANK_NAMES[tower.rank]}.`);
+  if (pay) grantFavor(1);
+  say(g, pay ? `${TOWERS[tower.kind].name} is ${RANK_NAMES[tower.rank]}. A favor.` : `${TOWERS[tower.kind].name} is ${RANK_NAMES[tower.rank]}.`);
   g.events.push("upgrade");
   noteDeed("hone");
   if (coachStep(g)?.kind === "hone") advanceCoach(g);
@@ -1305,6 +1317,7 @@ function hurt(
 function leak(g: Game, enemy: Enemy) {
   enemy.alive = false;
   if (g.phase !== "combat") return;
+  g.leaked = true;
   if (g.stoopWard) {
     g.stoopWard = false;
     g.events.push("leak");
@@ -1627,6 +1640,7 @@ function simulate(g: Game, dt: number) {
     const elapsed = Math.max(0, (g.combatTime || 0) - (g.roundMark || 0));
     g.roundTimes.push(elapsed);
     g.cleared = g.sent;
+    grantFavor(1);
     const mode = modeOf(g);
     const cap = nightCap(g);
     const finished = mode !== "endless" && g.sent >= cap;
@@ -1636,7 +1650,7 @@ function simulate(g: Game, dt: number) {
       if (!beginWave(g)) {
         endGame(g, "victory");
       } else {
-        say(g, `Night ${g.sent} hits the street. ${formatClock(elapsed)} on the last.`);
+        say(g, `Night ${g.sent} hits the street. ${formatClock(elapsed)} on the last. A favor.`);
         g.events.push("waveclear");
         g.events.push("wave");
       }
@@ -1644,7 +1658,7 @@ function simulate(g: Game, dt: number) {
       g.phase = "prep";
       g.paused = false;
       if (wantsOffer(g)) g.offerOpen = true;
-      say(g, `Night ${g.sent} is quiet. ${formatClock(elapsed)}.`);
+      say(g, `Night ${g.sent} is quiet. ${formatClock(elapsed)}. A favor.`);
       g.events.push("waveclear");
       if (mode === "endless" && g.cleared >= 12) noteDeed("endless");
     }
