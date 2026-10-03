@@ -19,6 +19,7 @@ import {
   type TowerId,
 } from "./balance";
 import { netSend } from "./online";
+import { noteDeed } from "./ledger";
 import {
   bindLeaveDuel,
   clickCell,
@@ -57,6 +58,55 @@ const INCOME_GOLD = 4;
 const INCOME_EVERY = 2;
 const SEND_EVERY = 7;
 const RESERVE = 16;
+
+type Mind = {
+  reserve: number;
+  pace: number;
+  order: PushId[];
+  wait: Record<PushId, number>;
+  honeFirst: boolean;
+  cheap: boolean;
+};
+
+/** How a rival court spends. Dresden is the old even hand. */
+const MINDS: Record<TeamId, Mind> = {
+  dresden: {
+    reserve: RESERVE,
+    pace: SEND_EVERY,
+    order: ["outsider", "blackcourt", "ghoul", "fledgling"],
+    wait: { fledgling: 0, ghoul: 10, blackcourt: 24, outsider: 50 },
+    honeFirst: false,
+    cheap: false,
+  },
+  red: {
+    reserve: 4,
+    pace: 5,
+    order: ["fledgling", "ghoul", "blackcourt", "outsider"],
+    wait: { fledgling: 0, ghoul: 4, blackcourt: 28, outsider: 90 },
+    honeFirst: false,
+    cheap: true,
+  },
+  winter: {
+    reserve: 8,
+    pace: 9,
+    order: ["blackcourt", "ghoul", "outsider", "fledgling"],
+    wait: { fledgling: 36, ghoul: 20, blackcourt: 6, outsider: 45 },
+    honeFirst: true,
+    cheap: false,
+  },
+  summer: {
+    reserve: 18,
+    pace: 8,
+    order: ["ghoul", "fledgling", "blackcourt", "outsider"],
+    wait: { fledgling: 6, ghoul: 0, blackcourt: 30, outsider: 70 },
+    honeFirst: false,
+    cheap: false,
+  },
+};
+
+function mindOf(team: TeamId): Mind {
+  return MINDS[team] ?? MINDS.dresden;
+}
 
 export type FriendRole = "host" | "guest";
 
@@ -159,23 +209,43 @@ function placeOn(g: Game, kind: TowerId, sites: Site[], cursor: { i: number }) {
 }
 
 function seedFoe(g: Game, sites: Site[]) {
+  const mind = mindOf(g.team);
   const units = TEAMS[g.team].units;
   const cursor = { i: 0 };
+  const first = units[0];
+  const second = mind.cheap ? units[0] : mind.honeFirst ? (units[2] ?? units[1]) : (units[1] ?? units[0]);
   runQuiet(() => {
-    placeOn(g, units[0], sites, cursor);
+    placeOn(g, first, sites, cursor);
+    if (mind.honeFirst) {
+      const tower = g.towers[0];
+      const cost = tower ? upgradeCost(tower.kind, tower.rank) : null;
+      if (tower && cost != null && g.gold - cost >= mind.reserve) {
+        g.selected = tower.id;
+        upgradeSelected(g);
+        g.selected = null;
+      }
+    }
     if (sites.length > 2) cursor.i = Math.min(sites.length - 1, 2);
-    placeOn(g, units[1] ?? units[0], sites, cursor);
+    if (g.gold >= TOWERS[second].cost + (mind.honeFirst ? mind.reserve : 0)) placeOn(g, second, sites, cursor);
     g.banner = "";
     g.bannerT = 0;
   });
   return cursor.i;
 }
 
+function pushKeep(mind: Mind) {
+  if (!mind.honeFirst) return mind.reserve + 20;
+  const armored = PUSHES.find((push) => push.id === "blackcourt")?.cost ?? 84;
+  return armored + mind.reserve;
+}
+
 function maybeUpgrade(g: Game) {
+  const mind = mindOf(g.team);
+  const floor = pushKeep(mind);
   for (const tower of g.towers) {
     const cost = upgradeCost(tower.kind, tower.rank);
     if (cost == null) continue;
-    if (g.gold - cost < RESERVE + 20) continue;
+    if (g.gold - cost < floor) continue;
     g.selected = tower.id;
     upgradeSelected(g);
     g.selected = null;
@@ -187,10 +257,16 @@ function maybeUpgrade(g: Game) {
 
 function maybePlace(session: Session) {
   const foe = session.foe;
-  if (foe.towers.length >= 4) return;
+  const mind = mindOf(foe.team);
+  if (foe.towers.length >= (mind.cheap ? 5 : 4)) return;
   const units = TEAMS[foe.team].units;
-  const kind = units[Math.min(units.length - 1, foe.towers.length)];
-  if (foe.gold < TOWERS[kind].cost + RESERVE + 10) return;
+  const kind = mind.cheap
+    ? units[0]
+    : mind.honeFirst
+      ? units[Math.min(units.length - 1, Math.max(1, foe.towers.length))]
+      : units[Math.min(units.length - 1, foe.towers.length)];
+  const keep = mind.honeFirst ? pushKeep(mind) - mind.reserve : 0;
+  if (foe.gold < TOWERS[kind].cost + mind.reserve + keep) return;
   const cursor = { i: session.siteCursor };
   if (placeOn(foe, kind, session.sites, cursor)) session.siteCursor = cursor.i;
 }
@@ -198,14 +274,15 @@ function maybePlace(session: Session) {
 function maybeSend(session: Session) {
   const foe = session.foe;
   const you = session.you;
-  const order = [...PUSHES].reverse();
-  const spec = order.find((push) => {
-    if (foe.gold - push.cost < RESERVE) return false;
-    if (push.kind === "outsider" && foe.combatTime < 50) return false;
-    if (push.kind === "blackcourt" && foe.combatTime < 24) return false;
-    if (push.kind === "ghoul" && foe.combatTime < 10) return false;
-    return true;
-  });
+  const mind = mindOf(foe.team);
+  const spec = mind.order
+    .map((id) => PUSHES.find((push) => push.id === id))
+    .find((push) => {
+      if (!push) return false;
+      if (foe.gold - push.cost < mind.reserve) return false;
+      if (foe.combatTime < mind.wait[push.id]) return false;
+      return true;
+    });
   if (!spec) return;
   foe.gold -= spec.cost;
   queueCreeps(you, spec.kind, spec.count, spec.interval);
@@ -220,12 +297,14 @@ function maybeSend(session: Session) {
 
 function bot(session: Session, sim: number) {
   if (session.foe.phase !== "combat" || session.you.phase !== "combat") return;
+  const mind = mindOf(session.foe.team);
   session.aiAcc += sim;
-  if (session.aiAcc < SEND_EVERY) return;
-  session.aiAcc -= SEND_EVERY;
+  if (session.aiAcc < mind.pace) return;
+  session.aiAcc -= mind.pace;
   runQuiet(() => {
-    maybeUpgrade(session.foe);
+    if (mind.honeFirst) maybeUpgrade(session.foe);
     maybePlace(session);
+    if (!mind.honeFirst) maybeUpgrade(session.foe);
     session.foe.banner = "";
     session.foe.bannerT = 0;
   });
@@ -332,6 +411,8 @@ export function startDuel(g: Game, mapId: MapId, youId: TeamId, rivalId: TeamId)
   fresh.team = you;
   fresh.phase = "combat";
   fresh.best = bests[map] ?? 0;
+  fresh.applyTrain = true;
+  fresh.limitRoster = true;
   Object.assign(g, fresh);
 
   const foe = createGame();
@@ -616,6 +697,8 @@ export function startFriendDuel(
   fresh.speed = 1;
   fresh.paused = false;
   fresh.best = bests[map] ?? 0;
+  fresh.applyTrain = true;
+  fresh.limitRoster = true;
   Object.assign(g, fresh);
 
   const foe = createGame();
@@ -768,6 +851,11 @@ export function stepDuel(g: Game, dt: number) {
     g.bannerSeq += 1;
     g.bannerT = 2.6;
     g.events.push("victory");
+    if (!session.online) {
+      if (foe.team === "winter") noteDeed("winter");
+      else if (foe.team === "red") noteDeed("red");
+      else if (foe.team === "summer") noteDeed("summer");
+    }
     session.dirty = true;
     ended = true;
   } else if (youPhase === "defeat") {

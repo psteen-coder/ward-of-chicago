@@ -1,6 +1,6 @@
 # Ward of Chicago
 
-Fan tower-defense game. The front door asks for single player or multiplayer before the night, the court, and the ground. Single player is Standard Night, Endless Night, or Speed Run. Multiplayer is either a local battle on this device, or a table with a friend: share a four-character code, each of you holds a street, and the first door to break loses. Friend tables use this website for the handshake, then the streets talk directly. The Android file joins the same table once it has this website's address. On a phone, lives, coin, and the night sit on top; tower names sit along the bottom. Hold a name for range and damage. Add it to your home screen from Settings to open it full screen.
+Fan tower-defense game. The case is the way in: a first night on a gold dot, then harder roads that swear in new towers, courts, and maps. Between nights the street offers coin, a free hone, or a one-hit ward. Favors from a first clear train damage, rate, or reach. A night on your own is Standard, Endless, or Speed, using what the case has opened. Multiplayer is a rival court on this device, or a friend at another screen. Friend tables use this website for the handshake, then the streets talk directly. The Android file joins once it has this website's address. On a phone, lives, coin, and the night sit on top; tower names sit along the bottom. Hold a name for range and damage.
 
 Not affiliated with Jim Butcher or the rights holders. Original art. No official logos.
 

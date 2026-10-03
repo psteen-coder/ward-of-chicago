@@ -72,13 +72,19 @@ import {
   setHover,
   setMode,
   startCase,
+  startStory,
   subscribe,
+  takeOffer,
   toMenu,
   togglePause,
   toggleSpeed,
   upgradeSelected,
+  playerRoster,
   type Hud,
 } from "@/game/engine";
+import { courtOpen, mapOpen, readLedger, serverLedger, subscribeLedger, towerOpen, trainedStats } from "@/game/ledger";
+import { CHAPTERS } from "@/game/story";
+import { DeedsPanel, StoryPanel, TrainPanel } from "@/components/Progress";
 
 declare global {
   interface Window {
@@ -92,6 +98,9 @@ declare global {
       push: (id: PushId) => void;
       watch: (side: "you" | "rival") => void;
       duel: () => DuelHud | null;
+      story: (index: number) => boolean;
+      offer: (kind: "coin" | "hone" | "ward") => void;
+      ledger: () => ReturnType<typeof readLedger>;
     };
   }
 }
@@ -191,7 +200,7 @@ function loadArt(art: ArtBook) {
   }
 }
 
-type DoorPanel = "main" | "case" | "battle" | "settings" | "multi" | "friend";
+type DoorPanel = "main" | "case" | "battle" | "settings" | "multi" | "friend" | "story" | "train" | "deeds";
 
 function tableFromUrl() {
   if (typeof window === "undefined") return "";
@@ -278,7 +287,7 @@ export function WardGame() {
       const tag = (event.target as HTMLElement | null)?.tagName;
       if (tag === "INPUT" || tag === "TEXTAREA") return;
       const digits = ["Digit1", "Digit2", "Digit3", "Digit4", "Digit5"];
-      const roster = (TEAMS[g.team] ?? TEAMS.dresden).units;
+      const roster = playerRoster(g);
       const index = digits.indexOf(event.code);
       if (index >= 0 && roster[index]) {
         selectKind(g, roster[index]);
@@ -314,6 +323,9 @@ export function WardGame() {
       push: (id: PushId) => pushCreep(g, id),
       watch: (side: "you" | "rival") => setWatch(side),
       duel: () => getDuel(),
+      story: (index: number) => startStory(g, index),
+      offer: (kind: "coin" | "hone" | "ward") => takeOffer(g, kind),
+      ledger: () => readLedger(),
     };
 
     return () => {
@@ -332,7 +344,12 @@ export function WardGame() {
   };
 
   const duel = getDuel();
-  const canSend = !duel && hud.phase === "prep" && (hud.mode === "endless" || hud.sent < hud.total);
+  const canSend =
+    !duel &&
+    hud.phase === "prep" &&
+    !hud.offerOpen &&
+    !hud.coachBlocks &&
+    (hud.mode === "endless" || hud.sent < hud.total);
   const playing = hud.phase === "prep" || hud.phase === "combat";
 
   const dropLink = () => {
@@ -448,6 +465,9 @@ export function WardGame() {
             <Coins className="size-4 text-primary" aria-hidden />
             <span className="num text-sm font-semibold">{hud.gold}</span>
           </span>
+          {hud.stoopWard ? (
+            <span className="shrink-0 text-sm font-semibold text-ward">Ward</span>
+          ) : null}
           {duel && playing ? (
             <span
               className={`flex shrink-0 items-center gap-1 ${duel.rivalLives <= 5 ? "text-danger" : ""}`}
@@ -545,6 +565,55 @@ export function WardGame() {
 
       <footer className="safe-pad safe-x shrink-0 border-t border-line bg-surface">
         <div className="mx-auto flex w-full max-w-3xl flex-col">
+          {hud.coach ? (
+            <p id="coach" className="px-1 pt-2 text-sm leading-relaxed text-fg">
+              {hud.coach}
+            </p>
+          ) : null}
+          {hud.offerOpen ? (
+            <div className="px-1 pt-2">
+              <p className="text-sm leading-relaxed text-muted">
+                {hud.offerLesson
+                  ? "The street offers one gift. It lasts the next night. Pick one."
+                  : "The street offers one gift for the next night."}
+              </p>
+              <div className="mt-2 grid grid-cols-3 gap-2">
+                <button
+                  id="offer-coin"
+                  type="button"
+                  className="min-h-11 rounded-lg bg-primary px-1 text-sm font-semibold text-primary-fg"
+                  onClick={() => {
+                    unlockAudio();
+                    takeOffer(ensureGame(), "coin");
+                  }}
+                >
+                  +40 coin
+                </button>
+                <button
+                  id="offer-hone"
+                  type="button"
+                  className="min-h-11 rounded-lg border border-line px-1 text-sm font-semibold"
+                  onClick={() => {
+                    unlockAudio();
+                    takeOffer(ensureGame(), "hone");
+                  }}
+                >
+                  Free hone
+                </button>
+                <button
+                  id="offer-ward"
+                  type="button"
+                  className="min-h-11 rounded-lg border border-line px-1 text-sm font-semibold"
+                  onClick={() => {
+                    unlockAudio();
+                    takeOffer(ensureGame(), "ward");
+                  }}
+                >
+                  Stoop ward
+                </button>
+              </div>
+            </div>
+          ) : null}
           {tip ? (
             <TowerCard
               kind={tip}
@@ -559,7 +628,7 @@ export function WardGame() {
           ) : null}
           {hud.selected && !tip ? <SelectedBar hud={hud} /> : null}
           <div className="flex gap-1 overflow-x-auto py-1.5" role="toolbar" aria-label="Defenders">
-            {TEAMS[hud.team].units.map((kind) => (
+            {hud.roster.map((kind) => (
               <TowerPick
                 key={kind}
                 kind={kind}
@@ -668,7 +737,7 @@ export function WardGame() {
           <div className="absolute inset-0 bg-bg/80 backdrop-blur-sm" />
           <div className="relative w-full max-w-md rounded-2xl border border-line bg-surface p-6 text-center sm:p-8">
             <p className="text-xs tracking-widest text-primary">
-              {duel ? "THE BATTLE" : hud.phase === "victory" ? "DAWN" : "THE DOOR"}
+              {duel ? "THE BATTLE" : hud.story != null ? "THE CASE" : hud.phase === "victory" ? "DAWN" : "THE DOOR"}
             </p>
             <p
               className={`mt-2 font-display text-3xl leading-tight ${hud.phase === "defeat" ? "text-danger" : "text-fg"}`}
@@ -677,7 +746,11 @@ export function WardGame() {
                 ? hud.phase === "victory"
                   ? "Their door broke"
                   : "Your door broke"
-                : hud.phase === "victory"
+                : hud.story != null
+                  ? hud.phase === "victory"
+                    ? hud.storyTitle
+                    : "The chapter broke"
+                  : hud.phase === "victory"
                   ? hud.mode === "speed"
                     ? "The clock stopped"
                     : "Dawn held"
@@ -688,14 +761,18 @@ export function WardGame() {
             <p className="mt-1 text-sm text-primary">
               {duel
                 ? `${duel.youTeam} vs ${duel.rivalTeam} · ${duel.mapPlace}`
-                : `${hud.modeName} · ${hud.teamName} · ${hud.mapPlace}`}
+                : hud.story != null
+                  ? `${hud.storyTitle} · ${hud.mapPlace}`
+                  : `${hud.modeName} · ${hud.teamName} · ${hud.mapPlace}`}
             </p>
             <p className="mt-3 text-sm leading-relaxed text-muted">
               {duel
                 ? hud.phase === "victory"
                   ? "The rival court could not hold the other street."
                   : "Your street gave way. Theirs is still standing."
-                : hud.phase === "victory" && hud.mode === "speed"
+                : hud.story != null
+                  ? hud.epilogue || hud.coach
+                  : hud.phase === "victory" && hud.mode === "speed"
                   ? "Ten nights, back to back. The score is how long the fight took, not how fast the clock on the wall ran."
                   : hud.phase === "victory"
                     ? `Ten nights on ${hud.mapPlace.toLowerCase()}. The last door still holds.`
@@ -859,6 +936,9 @@ function FrontDoor({
 }) {
   const offerInstall = !phone.standalone && !phone.installed && (phone.android || phone.canPrompt);
   const duel = getDuel();
+  const book = useSyncExternalStore(subscribeLedger, readLedger, serverLedger);
+  const caseDone = book.cleared >= CHAPTERS.length;
+  const nextChapter = CHAPTERS[Math.min(book.cleared, CHAPTERS.length - 1)];
   return (
     <div className="absolute inset-0 z-40 overflow-y-auto bg-bg">
       <div className={`safe-menu mx-auto flex min-h-full w-full max-w-5xl flex-col ${panel === "main" ? "justify-center" : ""}`}>
@@ -871,6 +951,20 @@ function FrontDoor({
             onBack={() => onPanel("main")}
             phone={phone}
           />
+        ) : panel === "story" ? (
+          <StoryPanel
+            onBack={() => onPanel("main")}
+            onStart={(index) => {
+              unlockAudio();
+              onDropLink();
+              onPanel("main");
+              startStory(ensureGame(), index);
+            }}
+          />
+        ) : panel === "train" ? (
+          <TrainPanel onBack={() => onPanel("main")} />
+        ) : panel === "deeds" ? (
+          <DeedsPanel onBack={() => onPanel("main")} />
         ) : panel === "case" ? (
           <CasePanel
             hud={hud}
@@ -964,7 +1058,7 @@ function FrontDoor({
               <p className="text-xs tracking-widest text-primary">AN UNOFFICIAL NIGHT</p>
               <h2 className="mt-3 font-display text-4xl leading-tight text-fg sm:text-6xl">Ward of Chicago</h2>
               <p className="mt-4 max-w-md text-base leading-relaxed text-muted">
-                Single player is a night on your own. Multiplayer is a friend at another screen, or a rival court on this one.
+                The case teaches the street, then swears new crafts and new roads. A night on your own uses whatever you have already unlocked.
               </p>
               <p className="mt-8 max-w-md text-xs leading-relaxed text-muted">
                 A fan game. Not affiliated with Jim Butcher or the rights holders.
@@ -1021,18 +1115,42 @@ function FrontDoor({
                 </button>
               ) : null}
               <button
-                id="play-single"
+                id="play-story"
                 type="button"
                 className={`min-h-14 w-full rounded-xl px-4 py-3 text-left font-semibold ${
                   hud.hasSave || duel?.parked
                     ? "border border-line bg-surface text-fg"
                     : "bg-primary text-primary-fg"
                 }`}
+                onClick={() => {
+                  unlockAudio();
+                  if (caseDone || !nextChapter) {
+                    onPanel("story");
+                    return;
+                  }
+                  onDropLink();
+                  onPanel("main");
+                  startStory(ensureGame(), book.cleared);
+                }}
+              >
+                <span className="block text-lg">
+                  {caseDone ? "The case" : book.cleared === 0 ? "Begin the case" : "Continue the case"}
+                </span>
+                <span className={`mt-0.5 block text-sm font-normal ${hud.hasSave || duel?.parked ? "text-muted" : "opacity-80"}`}>
+                  {caseDone
+                    ? "Every chapter is open. Walk one again."
+                    : `${nextChapter?.title ?? "The gold dot"}. ${nextChapter?.reward ?? ""}`}
+                </span>
+              </button>
+              <button
+                id="play-single"
+                type="button"
+                className="min-h-14 w-full rounded-xl border border-line bg-surface px-4 py-3 text-left font-semibold text-fg"
                 onClick={() => onPanel("case")}
               >
-                <span className="block text-lg">Single player</span>
-                <span className={`mt-0.5 block text-sm font-normal ${hud.hasSave || duel?.parked ? "text-muted" : "opacity-80"}`}>
-                  Night, court, and ground.
+                <span className="block text-lg">A night on your own</span>
+                <span className="mt-0.5 block text-sm font-normal text-muted">
+                  Standard, endless, or speed. Only what the case has opened.
                 </span>
               </button>
               <button
@@ -1046,6 +1164,32 @@ function FrontDoor({
                   A friend on another screen, or a rival court on this one.
                 </span>
               </button>
+              <div className="grid grid-cols-3 gap-3">
+                <button
+                  id="open-chapters"
+                  type="button"
+                  className="min-h-12 rounded-xl border border-line bg-surface px-2 text-sm font-semibold"
+                  onClick={() => onPanel("story")}
+                >
+                  Chapters
+                </button>
+                <button
+                  id="open-train"
+                  type="button"
+                  className="min-h-12 rounded-xl border border-line bg-surface px-2 text-sm font-semibold"
+                  onClick={() => onPanel("train")}
+                >
+                  Training
+                </button>
+                <button
+                  id="open-deeds"
+                  type="button"
+                  className="min-h-12 rounded-xl border border-line bg-surface px-2 text-sm font-semibold"
+                  onClick={() => onPanel("deeds")}
+                >
+                  Deeds
+                </button>
+              </div>
               <button
                 id="settings"
                 type="button"
@@ -1112,17 +1256,21 @@ function BattlePanel({
         {TEAM_ORDER.map((id) => {
           const def = TEAMS[id];
           const on = id === draftTeam;
+          const shut = !courtOpen(id);
           return (
             <button
               key={id}
               id={`you-${id}`}
               type="button"
               aria-pressed={on}
-              className={`min-h-11 rounded-xl border p-3 text-left ${on ? "border-primary bg-surface-2" : "border-line bg-surface"}`}
+              disabled={shut}
+              className={`min-h-11 rounded-xl border p-3 text-left disabled:opacity-40 ${on ? "border-primary bg-surface-2" : "border-line bg-surface"}`}
               onClick={() => onTeam(id)}
             >
               <span className="font-display text-lg leading-tight">{def.name}</span>
-              <span className="mt-1 block text-sm leading-relaxed text-muted">{def.blurb}</span>
+              <span className="mt-1 block text-sm leading-relaxed text-muted">
+                {shut ? "Still shut. The case opens this court." : def.blurb}
+              </span>
             </button>
           );
         })}
@@ -1153,17 +1301,21 @@ function BattlePanel({
         {MAP_ORDER.map((id) => {
           const def = MAPS[id];
           const on = id === draftMap;
+          const shut = !mapOpen(id);
           return (
             <button
               key={id}
               id={`ground-${id}`}
               type="button"
               aria-pressed={on}
-              className={`min-h-11 rounded-xl border p-3 text-left ${on ? "border-primary bg-surface-2" : "border-line bg-surface"}`}
+              disabled={shut}
+              className={`min-h-11 rounded-xl border p-3 text-left disabled:opacity-40 ${on ? "border-primary bg-surface-2" : "border-line bg-surface"}`}
               onClick={() => onMap(id)}
             >
               <span className="font-display text-lg leading-tight">{def.name}</span>
-              <span className="mt-1 block text-sm leading-relaxed text-muted">{def.blurb}</span>
+              <span className="mt-1 block text-sm leading-relaxed text-muted">
+                {shut ? "Still shut. The case opens this road." : def.blurb}
+              </span>
             </button>
           );
         })}
@@ -1171,7 +1323,8 @@ function BattlePanel({
       <button
         id="duel-start"
         type="button"
-        className="mt-6 min-h-12 w-full rounded-xl bg-primary font-semibold text-primary-fg"
+        className="mt-6 min-h-12 w-full rounded-xl bg-primary font-semibold text-primary-fg disabled:opacity-40"
+        disabled={!courtOpen(draftTeam) || !mapOpen(draftMap)}
         onClick={onStart}
       >
         Start battle · {TEAMS[draftTeam].name} vs {TEAMS[draftRival].name}
@@ -1237,29 +1390,34 @@ function CasePanel({
         {TEAM_ORDER.map((id) => {
           const def = TEAMS[id];
           const on = id === draftTeam;
+          const shut = !courtOpen(id);
           return (
             <button
               key={id}
               id={`team-${id}`}
               type="button"
               aria-pressed={on}
-              className={`min-h-11 rounded-xl border p-3 text-left ${on ? "border-primary bg-surface-2" : "border-line bg-surface"}`}
+              disabled={shut}
+              className={`min-h-11 rounded-xl border p-3 text-left disabled:opacity-40 ${on ? "border-primary bg-surface-2" : "border-line bg-surface"}`}
               onClick={() => onTeam(id)}
             >
               <span className="font-display text-lg leading-tight">{def.name}</span>
-              <span className="mt-1 block text-sm leading-relaxed text-muted">{def.blurb}</span>
+              <span className="mt-1 block text-sm leading-relaxed text-muted">
+                {shut ? "Still shut. The case opens this court." : def.blurb}
+              </span>
             </button>
           );
         })}
       </div>
       <p className="mt-3 text-sm text-primary">
-        {team.units.map((id) => TOWERS[id].name).join(" · ")}
+        {team.units.filter((id) => towerOpen(id)).map((id) => TOWERS[id].name).join(" · ")}
       </p>
       <p className="mt-6 text-xs tracking-widest text-muted">GROUND</p>
       <div className="mt-2 grid gap-2 sm:grid-cols-2">
         {MAP_ORDER.map((id) => {
           const def = MAPS[id];
           const on = id === draftMap;
+          const shut = !mapOpen(id);
           const mark =
             draftMode === "endless"
               ? (hud.marks.endless[id] ?? 0)
@@ -1280,17 +1438,20 @@ function CasePanel({
               id={`level-${id}`}
               type="button"
               aria-pressed={on}
-              className={`min-h-11 rounded-xl border p-3 text-left ${on ? "border-primary bg-surface-2" : "border-line bg-surface"}`}
+              disabled={shut}
+              className={`min-h-11 rounded-xl border p-3 text-left disabled:opacity-40 ${on ? "border-primary bg-surface-2" : "border-line bg-surface"}`}
               onClick={() => onMap(id)}
             >
               <span className="flex items-baseline justify-between gap-3">
                 <span className="font-display text-lg leading-tight">{def.name}</span>
                 <span className="flex shrink-0 items-center gap-1 text-xs text-muted">
                   <Moon className="size-3.5 text-primary" aria-hidden />
-                  {markLabel}
+                  {shut ? "Shut" : markLabel}
                 </span>
               </span>
-              <span className="mt-1 block text-sm leading-relaxed text-muted">{def.blurb}</span>
+              <span className="mt-1 block text-sm leading-relaxed text-muted">
+                {shut ? "Still shut. The case opens this road." : def.blurb}
+              </span>
             </button>
           );
         })}
@@ -1298,7 +1459,8 @@ function CasePanel({
       <button
         id="start-case"
         type="button"
-        className="mt-6 min-h-12 w-full rounded-xl bg-primary px-3 font-semibold text-primary-fg"
+        className="mt-6 min-h-12 w-full rounded-xl bg-primary px-3 font-semibold text-primary-fg disabled:opacity-40"
+        disabled={!courtOpen(draftTeam) || !mapOpen(draftMap)}
         onClick={onStart}
       >
         Start · {mode.name} · {team.name}
@@ -1607,7 +1769,7 @@ function TowerCard({
   onDismiss: () => void;
 }) {
   const def = TOWERS[kind];
-  const stats = combatStats(kind, 1);
+  const stats = trainedStats(kind, 1);
   const extra = extraLine(stats);
   return (
     <div
@@ -1673,6 +1835,7 @@ function SelectedBar({ hud }: { hud: Hud }) {
           ).map(([mode, label]) => (
             <button
               key={mode}
+              id={`aim-${mode}`}
               type="button"
               aria-label={mode === "nearest" ? "Nearest" : mode === "strongest" ? "Strongest" : "First"}
               aria-pressed={sel.mode === mode}
@@ -1687,6 +1850,7 @@ function SelectedBar({ hud }: { hud: Hud }) {
         </div>
         {sel.upgrade != null ? (
           <button
+            id="hone"
             type="button"
             className="h-9 shrink-0 rounded-lg bg-primary px-2.5 text-xs font-semibold text-primary-fg"
             onClick={() => {
@@ -1694,12 +1858,13 @@ function SelectedBar({ hud }: { hud: Hud }) {
               upgradeSelected(ensureGame());
             }}
           >
-            Hone {sel.upgrade}
+            Hone {sel.upgrade === 0 ? "free" : sel.upgrade}
           </button>
         ) : (
           <span className="flex h-9 shrink-0 items-center px-1 text-xs text-muted">Warden</span>
         )}
         <button
+          id="sell"
           type="button"
           className="h-9 shrink-0 rounded-lg border border-line px-2.5 text-xs text-danger"
           onClick={() => {

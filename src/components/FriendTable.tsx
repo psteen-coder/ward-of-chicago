@@ -15,6 +15,7 @@ import { ensureGame } from "@/game/engine";
 import { bindNetSend, netSend } from "@/game/online";
 import { useP2PRoom } from "@/lib/multiplayer";
 import { isNativeShell, rememberSignalOrigin, shareableInvite, signalBase } from "@/lib/multiplayer/signal-base";
+import { courtOpen, mapOpen } from "@/game/ledger";
 
 export type FriendLink = {
   role: FriendRole;
@@ -358,20 +359,24 @@ export function FriendPanel({
         {TEAM_ORDER.map((id) => {
           const def = TEAMS[id];
           const on = id === team;
+          const shut = !courtOpen(id);
           return (
             <button
               key={id}
               id={`seat-${id}`}
               type="button"
               aria-pressed={on}
-              className={`min-h-11 rounded-xl border p-3 text-left ${on ? "border-primary bg-surface-2" : "border-line bg-surface"}`}
+              disabled={shut}
+              className={`min-h-11 rounded-xl border p-3 text-left disabled:opacity-40 ${on ? "border-primary bg-surface-2" : "border-line bg-surface"}`}
               onClick={() => {
                 onTeam(id);
                 onReady(false);
               }}
             >
               <span className="font-display text-lg leading-tight">{def.name}</span>
-              <span className="mt-1 block text-sm leading-relaxed text-muted">{def.blurb}</span>
+              <span className="mt-1 block text-sm leading-relaxed text-muted">
+                {shut ? "Still shut. The case opens this court." : def.blurb}
+              </span>
             </button>
           );
         })}
@@ -387,18 +392,21 @@ export function FriendPanel({
             {MAP_ORDER.map((id) => {
               const def = MAPS[id];
               const on = id === map;
+              const shut = !mapOpen(id);
               return (
                 <button
                   key={id}
                   id={`friend-ground-${id}`}
                   type="button"
                   aria-pressed={on}
-                  disabled={!!link && link.role === "guest"}
+                  disabled={shut || (!!link && link.role === "guest")}
                   className={`min-h-11 rounded-xl border p-3 text-left disabled:opacity-40 ${on ? "border-primary bg-surface-2" : "border-line bg-surface"}`}
                   onClick={() => onMap(id)}
                 >
                   <span className="font-display text-lg leading-tight">{def.name}</span>
-                  <span className="mt-1 block text-sm leading-relaxed text-muted">{def.blurb}</span>
+                  <span className="mt-1 block text-sm leading-relaxed text-muted">
+                    {shut ? "Still shut. The case opens this road." : def.blurb}
+                  </span>
                 </button>
               );
             })}
