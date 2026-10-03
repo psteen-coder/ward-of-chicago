@@ -58,6 +58,7 @@ jobs:
           npm install --no-save --no-package-lock @capacitor/core@7 @capacitor/cli@7 @capacitor/android@7
           npx cap add android
           npx cap sync android
+          node scripts/android-icon.mjs
           node scripts/android-sign.mjs
 
       - name: Signing key
