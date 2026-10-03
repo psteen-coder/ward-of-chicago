@@ -16,25 +16,56 @@ export type Ledger = {
   maps: MapId[];
   train: Partial<Record<TowerId, Train>>;
   deeds: string[];
+  /** True after deeds already on the shelf have paid their favors once. */
+  deedGrant: boolean;
+  /** 1 paid the first deed table. 2 paid the current table. */
+  favorScale: number;
 };
 
-export type Deed = { id: string; name: string; detail: string };
+export type Deed = { id: string; name: string; detail: string; favors: number };
 
 export const DEEDS: Deed[] = [
-  { id: "first-ward", name: "The door held", detail: "Finish the first lesson on the gold dot." },
-  { id: "hone", name: "Honed", detail: "Hone a defender in the field." },
-  { id: "aim", name: "Chosen target", detail: "Aim a tower at First, Nearest, or Strongest." },
-  { id: "offer", name: "The street's gift", detail: "Take a gift between nights." },
-  { id: "ward", name: "The ward spent", detail: "A stoop ward takes a hit that would have reached the door." },
-  { id: "sell", name: "Released", detail: "Sell a defender back to the night." },
-  { id: "train", name: "Trained", detail: "Spend a favor to train a craft." },
-  { id: "dawn", name: "Ten nights", detail: "Finish a Standard Night." },
-  { id: "endless", name: "Past dawn", detail: "Finish night 12 of an Endless Night." },
-  { id: "winter", name: "Winter broke", detail: "Break the Winter Court on this device." },
-  { id: "red", name: "The vein closed", detail: "Break the Red Court on this device." },
-  { id: "summer", name: "The wood went quiet", detail: "Break the Summer Court on this device." },
-  { id: "case", name: "The case is closed", detail: "Finish the last chapter." },
+  { id: "first-ward", name: "The door held", detail: "Finish the first lesson on the gold dot.", favors: 3 },
+  { id: "hone", name: "Honed", detail: "Hone a defender in the field.", favors: 3 },
+  { id: "aim", name: "Chosen target", detail: "Aim a tower at First, Nearest, or Strongest.", favors: 3 },
+  { id: "offer", name: "The street's gift", detail: "Take a gift between nights.", favors: 3 },
+  { id: "ward", name: "The ward spent", detail: "A stoop ward takes a hit that would have reached the door.", favors: 3 },
+  { id: "sell", name: "Released", detail: "Sell a defender back to the night.", favors: 3 },
+  { id: "train", name: "Trained", detail: "Spend a favor to train a craft.", favors: 3 },
+  { id: "dawn", name: "Ten nights", detail: "Finish a Standard Night.", favors: 5 },
+  { id: "endless", name: "Past dawn", detail: "Finish night 12 of an Endless Night.", favors: 8 },
+  { id: "winter", name: "Winter broke", detail: "Break the Winter Court on this device.", favors: 5 },
+  { id: "red", name: "The vein closed", detail: "Break the Red Court on this device.", favors: 5 },
+  { id: "summer", name: "The wood went quiet", detail: "Break the Summer Court on this device.", favors: 5 },
+  { id: "case", name: "The case is closed", detail: "Finish the last chapter.", favors: 8 },
+  { id: "clean-0", name: "Gold dot, sealed", detail: "Finish The gold dot with nothing at the door.", favors: 3 },
+  { id: "clean-1", name: "Tiny sword, sealed", detail: "Finish A tiny sword with nothing at the door.", favors: 3 },
+  { id: "clean-2", name: "Rod, sealed", detail: "Finish Hone the rod with nothing at the door.", favors: 3 },
+  { id: "clean-3", name: "Small ones, sealed", detail: "Finish Behind the small ones with nothing at the door.", favors: 3 },
+  { id: "clean-4", name: "Knight, sealed", detail: "Finish The knight with nothing at the door.", favors: 3 },
+  { id: "clean-5", name: "Terrace, sealed", detail: "Finish South terrace with nothing at the door.", favors: 3 },
+  { id: "clean-6", name: "Tithe, sealed", detail: "Finish The tithe with nothing at the door.", favors: 3 },
+  { id: "clean-7", name: "Old wood, sealed", detail: "Finish The old wood with nothing at the door.", favors: 3 },
+  { id: "clean-8", name: "Pale road, sealed", detail: "Finish The pale road with nothing at the door.", favors: 3 },
+  { id: "clean-all", name: "Every chapter sealed", detail: "Finish every chapter with nothing at the door.", favors: 8 },
 ];
+
+/** What the first deed payout already gave, so a raise does not pay that part twice. */
+const DEED_PAID_V1: Record<string, number> = {
+  "first-ward": 1,
+  hone: 1,
+  aim: 1,
+  offer: 1,
+  ward: 1,
+  sell: 1,
+  train: 1,
+  dawn: 2,
+  endless: 3,
+  winter: 2,
+  red: 2,
+  summer: 2,
+  case: 3,
+};
 
 const emptyTrain = (): Train => ({ dmg: 0, rate: 0, range: 0 });
 
@@ -48,6 +79,8 @@ function fresh(): Ledger {
     maps: ["chicago"],
     train: {},
     deeds: [],
+    deedGrant: true,
+    favorScale: 2,
   };
 }
 
@@ -105,6 +138,12 @@ function sanitize(raw: unknown): Ledger {
     maps,
     train,
     deeds,
+    deedGrant: data.deedGrant === true,
+    favorScale: Number.isFinite(data.favorScale)
+      ? Math.max(0, Math.floor(Number(data.favorScale)))
+      : data.deedGrant === true
+        ? 1
+        : 0,
   };
 }
 
@@ -121,21 +160,53 @@ export function readLedger(): Ledger {
       return cache;
     }
     const raw = localStorage.getItem(LEDGER_KEY);
+    const hadSave = raw != null;
     cache = raw ? sanitize(JSON.parse(raw) as unknown) : fresh();
+    cache = settleDeeds(cache, hadSave);
   } catch {
     cache = fresh();
   }
   return cache;
 }
 
-function write(book: Ledger) {
+/** Deeds already unlocked pay the current table once. A raised table pays only the difference. */
+function settleDeeds(book: Ledger, hadSave: boolean): Ledger {
+  const scale = book.favorScale ?? (book.deedGrant ? 1 : 0);
+  if (scale >= 2) return book;
+  let bonus = 0;
+  for (const id of book.deeds) {
+    const already = scale >= 1 ? (DEED_PAID_V1[id] ?? 0) : 0;
+    bonus += Math.max(0, deedFavor(id) - already);
+  }
+  const next = { ...book, favors: book.favors + bonus, deedGrant: true, favorScale: 2 };
+  if (hadSave || bonus > 0) persist(next);
+  else cache = next;
+  return next;
+}
+
+export function grantFavor(count: number) {
+  const n = Math.max(0, Math.floor(count));
+  if (!n) return;
+  const book = readLedger();
+  write({ ...book, favors: book.favors + n });
+}
+
+function persist(book: Ledger) {
   cache = book;
   try {
     if (typeof localStorage !== "undefined") localStorage.setItem(LEDGER_KEY, JSON.stringify(book));
   } catch {
     /* private mode */
   }
+}
+
+function write(book: Ledger) {
+  persist(book);
   for (const listener of listeners) listener();
+}
+
+export function deedFavor(id: string) {
+  return DEEDS.find((deed) => deed.id === id)?.favors ?? 0;
 }
 
 export function courtOpen(id: TeamId) {
@@ -199,7 +270,7 @@ export function noteDeed(id: string): boolean {
   const book = readLedger();
   if (book.deeds.includes(id)) return false;
   if (!DEEDS.some((deed) => deed.id === id)) return false;
-  write({ ...book, deeds: [...book.deeds, id] });
+  write({ ...book, deeds: [...book.deeds, id], favors: book.favors + deedFavor(id) });
   return true;
 }
 
@@ -220,10 +291,11 @@ export function grantProgress(reward: {
   for (const id of reward.courts) if (!courts.includes(id)) courts.push(id);
   const maps = [...book.maps];
   for (const id of reward.maps) if (!maps.includes(id)) maps.push(id);
-  const deeds = reward.deed && !book.deeds.includes(reward.deed) ? [...book.deeds, reward.deed] : book.deeds;
+  const deedNew = Boolean(reward.deed) && !book.deeds.includes(reward.deed as string);
+  const deeds = deedNew ? [...book.deeds, reward.deed as string] : book.deeds;
   write({
     ...book,
-    favors: book.favors + reward.favors,
+    favors: book.favors + reward.favors + (deedNew ? deedFavor(reward.deed as string) : 0),
     cleared: reward.chapter + 1,
     towers,
     courts,

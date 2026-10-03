@@ -83,7 +83,7 @@ import {
   type Hud,
 } from "@/game/engine";
 import { courtOpen, mapOpen, readLedger, serverLedger, subscribeLedger, towerOpen, trainedStats } from "@/game/ledger";
-import { CHAPTERS } from "@/game/story";
+import { CHAPTERS, canPlayChapter } from "@/game/story";
 import { DeedsPanel, StoryPanel, TrainPanel } from "@/components/Progress";
 
 declare global {
@@ -344,6 +344,10 @@ export function WardGame() {
   };
 
   const duel = getDuel();
+  const nextChapter =
+    !duel && hud.phase === "victory" && hud.story != null && canPlayChapter(hud.story + 1)
+      ? CHAPTERS[hud.story + 1]
+      : undefined;
   const canSend =
     !duel &&
     hud.phase === "prep" &&
@@ -781,10 +785,24 @@ export function WardGame() {
                       : `${hud.mapPlace} gave way. Walk the same ground again, or choose another.`}
             </p>
             {duel ? <BattleScore hud={hud} duel={duel} /> : <ScoreCard hud={hud} />}
+            {nextChapter ? (
+              <button
+                id="next-chapter"
+                type="button"
+                className="mt-6 min-h-12 w-full rounded-xl bg-primary font-semibold text-primary-fg"
+                onClick={() => {
+                  unlockAudio();
+                  startStory(ensureGame(), (hud.story ?? 0) + 1);
+                }}
+              >
+                Next chapter
+                <span className="mt-0.5 block text-xs font-normal opacity-80">{nextChapter.title}</span>
+              </button>
+            ) : null}
             <button
               id="restart"
               type="button"
-              className="mt-6 min-h-12 w-full rounded-xl bg-primary font-semibold text-primary-fg"
+              className={`${nextChapter ? "mt-2 border border-line text-fg" : "mt-6 bg-primary text-primary-fg"} min-h-12 w-full rounded-xl font-semibold`}
               onClick={() => {
                 unlockAudio();
                 if (duel?.online) {

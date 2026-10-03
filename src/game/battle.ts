@@ -19,7 +19,7 @@ import {
   type TowerId,
 } from "./balance";
 import { netSend } from "./online";
-import { noteDeed } from "./ledger";
+import { grantFavor, noteDeed } from "./ledger";
 import {
   bindLeaveDuel,
   clickCell,
@@ -221,7 +221,7 @@ function seedFoe(g: Game, sites: Site[]) {
       const cost = tower ? upgradeCost(tower.kind, tower.rank) : null;
       if (tower && cost != null && g.gold - cost >= mind.reserve) {
         g.selected = tower.id;
-        upgradeSelected(g);
+        upgradeSelected(g, false);
         g.selected = null;
       }
     }
@@ -247,7 +247,7 @@ function maybeUpgrade(g: Game) {
     if (cost == null) continue;
     if (g.gold - cost < floor) continue;
     g.selected = tower.id;
-    upgradeSelected(g);
+    upgradeSelected(g, false);
     g.selected = null;
     g.banner = "";
     g.bannerT = 0;
@@ -524,10 +524,11 @@ function claimRemoteBreak(g: Game) {
   g.phase = "victory";
   g.placing = null;
   g.paused = false;
-  g.banner = `${TEAMS[foe.team].name} broke.`;
+  g.banner = `${TEAMS[foe.team].name} broke. Two favors.`;
   g.bannerSeq += 1;
   g.bannerT = 2.6;
   g.events.push("victory");
+  grantFavor(2);
   session.dirty = true;
 }
 
@@ -847,10 +848,11 @@ export function stepDuel(g: Game, dt: number) {
     g.phase = "victory";
     g.placing = null;
     g.paused = false;
-    g.banner = `${TEAMS[foe.team].name} broke.`;
+    g.banner = `${TEAMS[foe.team].name} broke. Two favors.`;
     g.bannerSeq += 1;
     g.bannerT = 2.6;
     g.events.push("victory");
+    grantFavor(2);
     if (!session.online) {
       if (foe.team === "winter") noteDeed("winter");
       else if (foe.team === "red") noteDeed("red");
