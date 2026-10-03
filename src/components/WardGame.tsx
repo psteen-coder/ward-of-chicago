@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
-import { Coins, Heart, Menu, Moon, Pause, Play, Settings, Smartphone, Volume2, VolumeX } from "lucide-react";
+import { Coins, Heart, Menu, Moon, Pause, Play, Smartphone, Volume2, VolumeX } from "lucide-react";
 import { getVolume, loadAudioPrefs, playEvent, setMuted, setVolume, unlockAudio } from "@/game/audio";
 import {
   MAP_ORDER,
@@ -82,9 +82,9 @@ import {
   playerRoster,
   type Hud,
 } from "@/game/engine";
-import { courtOpen, mapOpen, readLedger, serverLedger, subscribeLedger, towerOpen, trainedStats } from "@/game/ledger";
+import { courtOpen, mapOpen, readLedger, towerOpen, trainedStats } from "@/game/ledger";
 import { CHAPTERS, canPlayChapter } from "@/game/story";
-import { DeedsPanel, StoryPanel, TrainPanel } from "@/components/Progress";
+import { DeedsPanel, StoryPanel, TeamsPanel, TrainPanel } from "@/components/Progress";
 
 declare global {
   interface Window {
@@ -200,7 +200,7 @@ function loadArt(art: ArtBook) {
   }
 }
 
-type DoorPanel = "main" | "case" | "battle" | "settings" | "multi" | "friend" | "story" | "train" | "deeds";
+type DoorPanel = "main" | "case" | "battle" | "settings" | "multi" | "friend" | "story" | "train" | "deeds" | "teams" | "play" | "compendium";
 
 function tableFromUrl() {
   if (typeof window === "undefined") return "";
@@ -952,11 +952,7 @@ function FrontDoor({
   onBegin: () => void;
   onDropLink: () => void;
 }) {
-  const offerInstall = !phone.standalone && !phone.installed && (phone.android || phone.canPrompt);
   const duel = getDuel();
-  const book = useSyncExternalStore(subscribeLedger, readLedger, serverLedger);
-  const caseDone = book.cleared >= CHAPTERS.length;
-  const nextChapter = CHAPTERS[Math.min(book.cleared, CHAPTERS.length - 1)];
   return (
     <div className="absolute inset-0 z-40 overflow-y-auto bg-bg">
       <div className={`safe-menu mx-auto flex min-h-full w-full max-w-5xl flex-col ${panel === "main" ? "justify-center" : ""}`}>
@@ -980,9 +976,11 @@ function FrontDoor({
             }}
           />
         ) : panel === "train" ? (
-          <TrainPanel onBack={() => onPanel("main")} />
+          <TrainPanel onBack={() => onPanel("compendium")} />
         ) : panel === "deeds" ? (
-          <DeedsPanel onBack={() => onPanel("main")} />
+          <DeedsPanel onBack={() => onPanel("compendium")} />
+        ) : panel === "teams" ? (
+          <TeamsPanel onBack={() => onPanel("compendium")} />
         ) : panel === "case" ? (
           <CasePanel
             hud={hud}
@@ -992,7 +990,7 @@ function FrontDoor({
             onTeam={onTeam}
             onMap={onMap}
             onMode={onMode}
-            onBack={() => onPanel("main")}
+            onBack={() => onPanel("play")}
             onStart={() => {
               unlockAudio();
               onDropLink();
@@ -1018,7 +1016,7 @@ function FrontDoor({
           />
         ) : panel === "multi" ? (
           <div>
-            <button id="multi-back" type="button" className="min-h-11 rounded-lg px-1 text-sm text-muted" onClick={() => onPanel("main")}>
+            <button id="multi-back" type="button" className="min-h-11 rounded-lg px-1 text-sm text-muted" onClick={() => onPanel("play")}>
               Back
             </button>
             <h2 className="mt-3 font-display text-4xl leading-tight text-fg">Multiplayer</h2>
@@ -1070,28 +1068,18 @@ function FrontDoor({
             onLeave={onDropLink}
             onBack={() => onPanel("multi")}
           />
-        ) : (
-          <div className="grid items-center gap-10 lg:grid-cols-2">
-            <div>
-              <p className="text-xs tracking-widest text-primary">AN UNOFFICIAL NIGHT</p>
-              <h2 className="mt-3 font-display text-4xl leading-tight text-fg sm:text-6xl">Ward of Chicago</h2>
-              <p className="mt-4 max-w-md text-base leading-relaxed text-muted">
-                The case teaches the street, then swears new crafts and new roads. A night on your own uses whatever you have already unlocked.
-              </p>
-              <p className="mt-8 max-w-md text-xs leading-relaxed text-muted">
-                A fan game. Not affiliated with Jim Butcher or the rights holders.
-              </p>
-            </div>
-            <div className="flex flex-col gap-3">
+        ) : panel === "play" ? (
+          <div>
+            <button id="play-back" type="button" className="min-h-11 rounded-lg px-1 text-sm text-muted" onClick={() => onPanel("main")}>
+              Back
+            </button>
+            <h2 className="mt-3 font-display text-4xl leading-tight text-fg">Play now</h2>
+            <div className="mt-6 flex max-w-md flex-col gap-3">
               {hud.hasSave ? (
                 <button
                   id="continue"
                   type="button"
-                  className={`min-h-14 w-full rounded-xl px-4 py-3 text-left font-semibold ${
-                    duel?.parked
-                      ? "border border-line bg-surface text-fg"
-                      : "bg-primary text-primary-fg"
-                  }`}
+                  className="min-h-14 w-full rounded-xl bg-primary px-4 py-3 text-left font-semibold text-primary-fg"
                   onClick={() => {
                     unlockAudio();
                     onDropLink();
@@ -1100,13 +1088,11 @@ function FrontDoor({
                   }}
                 >
                   <span className="block text-lg">{duel?.parked ? "Continue night" : "Continue"}</span>
-                  <span className={`mt-0.5 block text-sm font-normal ${duel?.parked ? "text-muted" : "opacity-80"}`}>
+                  <span className="mt-0.5 block text-sm font-normal opacity-80">
                     {hud.saveMode ? `${hud.saveMode} · ` : ""}
                     {hud.saveTeam || hud.saveName}
                     {" · "}
-                    {hud.saveNight <= 0
-                      ? `${hud.savePlace}, night 1 waiting`
-                      : `${hud.savePlace}, night ${hud.saveNight}`}
+                    {hud.saveNight <= 0 ? `${hud.savePlace}, night 1 waiting` : `${hud.savePlace}, night ${hud.saveNight}`}
                   </span>
                 </button>
               ) : null}
@@ -1114,7 +1100,7 @@ function FrontDoor({
                 <button
                   id="continue-battle"
                   type="button"
-                  className="min-h-14 w-full rounded-xl bg-primary px-4 py-3 text-left font-semibold text-primary-fg"
+                  className="min-h-14 w-full rounded-xl border border-line bg-surface px-4 py-3 text-left font-semibold text-fg"
                   onClick={() => {
                     unlockAudio();
                     if (!duel.online) onDropLink();
@@ -1123,7 +1109,7 @@ function FrontDoor({
                   }}
                 >
                   <span className="block text-lg">Continue battle</span>
-                  <span className="mt-0.5 block text-sm font-normal opacity-80">
+                  <span className="mt-0.5 block text-sm font-normal text-muted">
                     {duel.online && duel.quiet
                       ? "The other street went quiet."
                       : duel.online
@@ -1133,105 +1119,108 @@ function FrontDoor({
                 </button>
               ) : null}
               <button
-                id="play-story"
-                type="button"
-                className={`min-h-14 w-full rounded-xl px-4 py-3 text-left font-semibold ${
-                  hud.hasSave || duel?.parked
-                    ? "border border-line bg-surface text-fg"
-                    : "bg-primary text-primary-fg"
-                }`}
-                onClick={() => {
-                  unlockAudio();
-                  if (caseDone || !nextChapter) {
-                    onPanel("story");
-                    return;
-                  }
-                  onDropLink();
-                  onPanel("main");
-                  startStory(ensureGame(), book.cleared);
-                }}
-              >
-                <span className="block text-lg">
-                  {caseDone ? "The case" : book.cleared === 0 ? "Begin the case" : "Continue the case"}
-                </span>
-                <span className={`mt-0.5 block text-sm font-normal ${hud.hasSave || duel?.parked ? "text-muted" : "opacity-80"}`}>
-                  {caseDone
-                    ? "Every chapter is open. Walk one again."
-                    : `${nextChapter?.title ?? "The gold dot"}. ${nextChapter?.reward ?? ""}`}
-                </span>
-              </button>
-              <button
                 id="play-single"
                 type="button"
-                className="min-h-14 w-full rounded-xl border border-line bg-surface px-4 py-3 text-left font-semibold text-fg"
+                className="min-h-14 w-full rounded-xl border border-line bg-surface text-lg font-semibold"
                 onClick={() => onPanel("case")}
               >
-                <span className="block text-lg">A night on your own</span>
-                <span className="mt-0.5 block text-sm font-normal text-muted">
-                  Standard, endless, or speed. Only what the case has opened.
-                </span>
+                A night on your own
               </button>
               <button
                 id="play-multi"
                 type="button"
-                className="min-h-14 w-full rounded-xl border border-line bg-surface px-4 py-3 text-left font-semibold text-fg"
+                className="min-h-14 w-full rounded-xl border border-line bg-surface text-lg font-semibold"
                 onClick={() => onPanel("multi")}
               >
-                <span className="block text-lg">Multiplayer</span>
-                <span className="mt-0.5 block text-sm font-normal text-muted">
-                  A friend on another screen, or a rival court on this one.
-                </span>
+                Multiplayer
               </button>
-              <div className="grid grid-cols-3 gap-3">
-                <button
-                  id="open-chapters"
-                  type="button"
-                  className="min-h-12 rounded-xl border border-line bg-surface px-2 text-sm font-semibold"
-                  onClick={() => onPanel("story")}
-                >
-                  Chapters
-                </button>
-                <button
-                  id="open-train"
-                  type="button"
-                  className="min-h-12 rounded-xl border border-line bg-surface px-2 text-sm font-semibold"
-                  onClick={() => onPanel("train")}
-                >
-                  Training
-                </button>
-                <button
-                  id="open-deeds"
-                  type="button"
-                  className="min-h-12 rounded-xl border border-line bg-surface px-2 text-sm font-semibold"
-                  onClick={() => onPanel("deeds")}
-                >
-                  Deeds
-                </button>
-              </div>
+            </div>
+          </div>
+        ) : panel === "compendium" ? (
+          <div>
+            <button
+              id="compendium-back"
+              type="button"
+              className="min-h-11 rounded-lg px-1 text-sm text-muted"
+              onClick={() => onPanel("main")}
+            >
+              Back
+            </button>
+            <h2 className="mt-3 font-display text-4xl leading-tight text-fg">Compendium</h2>
+            <div className="mt-6 flex max-w-md flex-col gap-3">
+              <button
+                id="open-teams"
+                type="button"
+                className="min-h-14 w-full rounded-xl border border-line bg-surface text-lg font-semibold"
+                onClick={() => onPanel("teams")}
+              >
+                Teams
+              </button>
+              <button
+                id="open-deeds"
+                type="button"
+                className="min-h-14 w-full rounded-xl border border-line bg-surface text-lg font-semibold"
+                onClick={() => onPanel("deeds")}
+              >
+                Deeds
+              </button>
+              <button
+                id="open-train"
+                type="button"
+                className="min-h-14 w-full rounded-xl border border-line bg-surface text-lg font-semibold"
+                onClick={() => onPanel("train")}
+              >
+                Training
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div className="mx-auto flex w-full max-w-sm flex-col">
+            <p className="text-xs tracking-widest text-primary">AN UNOFFICIAL NIGHT</p>
+            <h2 className="mt-3 font-display text-5xl leading-tight text-fg">Ward of Chicago</h2>
+            <div className="mt-10 flex flex-col gap-3">
+              <button
+                id="play-now"
+                type="button"
+                className="min-h-14 w-full rounded-xl bg-primary text-lg font-semibold text-primary-fg"
+                onClick={() => {
+                  unlockAudio();
+                  onPanel("play");
+                }}
+              >
+                Play now
+              </button>
+              <button
+                id="play-story"
+                type="button"
+                className="min-h-14 w-full rounded-xl border border-line bg-surface text-lg font-semibold"
+                onClick={() => {
+                  unlockAudio();
+                  onPanel("story");
+                }}
+              >
+                Story
+              </button>
+              <button
+                id="open-compendium"
+                type="button"
+                className="min-h-14 w-full rounded-xl border border-line bg-surface text-lg font-semibold"
+                onClick={() => onPanel("compendium")}
+              >
+                Compendium
+              </button>
               <button
                 id="settings"
                 type="button"
-                className="flex min-h-14 w-full items-center justify-center gap-2 rounded-xl border border-line bg-surface px-4 text-lg font-semibold text-fg"
+                className="min-h-14 w-full rounded-xl border border-line bg-surface text-lg font-semibold"
                 onClick={() => onPanel("settings")}
               >
-                <Settings className="size-5 text-primary" aria-hidden />
                 Settings
               </button>
-              {offerInstall ? (
-                <button
-                  id="install-app"
-                  type="button"
-                  className="flex min-h-14 w-full items-center justify-center gap-2 rounded-xl border border-line bg-surface px-4 text-lg font-semibold text-fg"
-                  onClick={() => {
-                    if (phone.canPrompt) phone.install();
-                    else onPanel("settings");
-                  }}
-                >
-                  <Smartphone className="size-5 text-primary" aria-hidden />
-                  Add to Home screen
-                </button>
-              ) : null}
             </div>
+            <p className="mt-10 text-xs leading-relaxed text-muted">
+              A fan game. Not affiliated with Jim Butcher or the rights holders.
+            </p>
           </div>
         )}
       </div>

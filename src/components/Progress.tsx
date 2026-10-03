@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { TEAMS, TOWERS, type TowerId } from "@/game/balance";
+import { TEAM_ORDER, TEAMS, TOWERS, combatStats, type TeamId, type TowerId } from "@/game/balance";
 import {
   DEEDS,
   readLedger,
@@ -203,6 +203,125 @@ export function DeedsPanel({ onBack }: { onBack: () => void }) {
               </button>
             );
           })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function statNum(n: number) {
+  const rounded = Math.round(n * 100) / 100;
+  return Number.isInteger(rounded) ? String(rounded) : String(rounded);
+}
+
+function craftLine(kind: TowerId) {
+  const stats = combatStats(kind, 1);
+  const bits: string[] = [];
+  if (stats.splash > 0) bits.push(`splash ${statNum(stats.splash)}`);
+  if (stats.slow > 0) bits.push(`chill ${statNum(stats.slow)}s`);
+  if (stats.pierce) bits.push("ignores armor");
+  if (stats.dot > 0) bits.push(`${statNum(stats.dot)} for ${statNum(stats.dotTime)}s`);
+  if (stats.stun > 0) bits.push(`root ${statNum(stats.stun)}s`);
+  if (stats.siphon > 0) bits.push(`+${stats.siphon} coin on a kill`);
+  if (stats.shatter > 0) bits.push(`+${Math.round(stats.shatter * 100)}% vs chilled`);
+  return bits.join(" · ");
+}
+
+export function TeamsPanel({ onBack }: { onBack: () => void }) {
+  const book = readLedger();
+  const [team, setTeam] = useState<TeamId | null>(null);
+  const [unit, setUnit] = useState<TowerId | null>(null);
+  const court = team ? TEAMS[team] : null;
+  const def = unit ? TOWERS[unit] : null;
+  const sworn = unit != null && book.towers.includes(unit);
+  const printed = unit ? combatStats(unit, 1) : null;
+  const extra = unit ? craftLine(unit) : "";
+
+  const back = () => {
+    if (unit) setUnit(null);
+    else if (team) setTeam(null);
+    else onBack();
+  };
+
+  return (
+    <div>
+      <button id="teams-back" type="button" className="min-h-11 rounded-lg px-1 text-sm text-muted" onClick={back}>
+        {unit && court ? court.name : team ? "All teams" : "Back"}
+      </button>
+      {def && unit && printed ? (
+        <article className="mt-3">
+          <div className="overflow-hidden rounded-2xl border border-line bg-[#0c1016]">
+            <img src={`/game/${unit}.png`} alt="" className="mx-auto max-h-80 w-full object-contain" draggable={false} />
+          </div>
+          <p className="mt-4 text-xs tracking-widest text-primary">{court?.name}</p>
+          <h2 className="mt-1 font-display text-4xl leading-tight">{def.name}</h2>
+          <p className="mt-1 text-sm text-primary">
+            {def.craft} · {def.cost} coin{sworn ? "" : " · not sworn"}
+          </p>
+          <p className="mt-3 max-w-xl text-sm leading-relaxed">{def.blurb}</p>
+          <p className="mt-3 text-sm">
+            Damage {statNum(printed.damage)}
+            <span className="text-muted"> · </span>
+            Fire {statNum(printed.rate)}/s
+            <span className="text-muted"> · </span>
+            Reach {statNum(printed.range)}
+          </p>
+          <p className="mt-1 text-sm text-muted">
+            {def.special}
+            {extra ? ` · ${extra}` : ""}
+          </p>
+          <p className="mt-2 text-xs text-muted">Printed at Sworn. Honing in the street raises it.</p>
+        </article>
+      ) : court && team ? (
+        <div>
+          <h2 className="mt-3 font-display text-4xl leading-tight text-fg">{court.name}</h2>
+          <p className="mt-2 max-w-xl text-sm leading-relaxed text-muted">{court.blurb}</p>
+          <div className="mt-4 grid grid-cols-2 gap-2">
+            {court.units.map((kind) => {
+              const row = TOWERS[kind];
+              const open = book.towers.includes(kind);
+              return (
+                <button
+                  key={kind}
+                  id={`team-unit-${kind}`}
+                  type="button"
+                  className="rounded-xl border border-line bg-surface p-2 text-left"
+                  onClick={() => setUnit(kind)}
+                >
+                  <span className="grid h-28 place-items-center overflow-hidden rounded-lg bg-[#0c1016]">
+                    <img src={`/game/${kind}.png`} alt="" className="h-full w-full object-contain" draggable={false} />
+                  </span>
+                  <span className="mt-2 block font-display text-base leading-tight">{row.name}</span>
+                  <span className="mt-0.5 block text-xs text-muted">
+                    {row.craft}
+                    {open ? "" : " · not sworn"}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      ) : (
+        <div>
+          <h2 className="mt-3 font-display text-4xl leading-tight text-fg">Teams</h2>
+          <p className="mt-2 max-w-xl text-sm leading-relaxed text-muted">Four courts. Open one, then a craft.</p>
+          <div className="mt-4 grid gap-2">
+            {TEAM_ORDER.map((id) => {
+              const row = TEAMS[id];
+              return (
+                <button
+                  key={id}
+                  id={`team-${id}`}
+                  type="button"
+                  className="min-h-16 rounded-xl border border-line bg-surface px-3 py-3 text-left"
+                  onClick={() => setTeam(id)}
+                >
+                  <span className="block font-display text-lg leading-tight">{row.name}</span>
+                  <span className="mt-1 block text-sm text-muted">{row.blurb}</span>
+                </button>
+              );
+            })}
+          </div>
         </div>
       )}
     </div>
